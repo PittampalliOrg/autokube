@@ -9,6 +9,7 @@
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Command from '$lib/components/ui/command';
 	import * as Popover from '$lib/components/ui/popover';
+	import NamespaceSelect from '$lib/components/namespace-select.svelte';
 	import ConfirmDelete from '$lib/components/confirm-delete.svelte';
 	import CodeEditor from '$lib/components/code-editor.svelte';
 	import { cn } from '$lib/utils';
@@ -532,26 +533,11 @@
 
 			<!-- Namespace selector -->
 			{#if selectedCrd?.scope === 'Namespaced'}
-				<Select.Root
-					type="single"
+				<NamespaceSelect
+					{namespaces}
 					value={selectedNamespace}
-					onValueChange={(v: string) => {
-						if (v) {
-							selectedNamespace = v;
-							fetchResources();
-						}
-					}}
-				>
-					<Select.Trigger class="h-8 flex-1 text-xs sm:w-44">
-						{selectedNamespace === 'all' ? 'All namespaces' : selectedNamespace}
-					</Select.Trigger>
-					<Select.Content>
-						<Select.Item value="all">All namespaces</Select.Item>
-						{#each namespaces as ns (ns)}
-							<Select.Item value={ns}>{ns}</Select.Item>
-						{/each}
-					</Select.Content>
-				</Select.Root>
+					onChange={(ns) => { selectedNamespace = ns; fetchResources(); }}
+				/>
 			{/if}
 
 			<!-- Search -->

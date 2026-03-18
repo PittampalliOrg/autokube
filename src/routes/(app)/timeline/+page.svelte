@@ -8,6 +8,7 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Button } from '$lib/components/ui/button';
 	import * as Select from '$lib/components/ui/select';
+	import NamespaceSelect from '$lib/components/namespace-select.svelte';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Badge } from '$lib/components/ui/badge';
 	import NamespaceBadge from '$lib/components/namespace-badge.svelte';
@@ -212,19 +213,11 @@
 				</Select.Content>
 			</Select.Root>
 
-			<Select.Root
-				type="single"
+			<NamespaceSelect
+				{namespaces}
 				value={selectedNamespace}
-				onValueChange={(v: string) => { if (v) selectedNamespace = v; }}
-			>
-				<Select.Trigger class="h-8 w-36 text-xs">
-					{selectedNamespace === 'all' ? 'All namespaces' : selectedNamespace}
-				</Select.Trigger>
-				<Select.Content>
-					<Select.Item value="all">All namespaces</Select.Item>
-					{#each namespaces as ns (ns)}<Select.Item value={ns}>{ns}</Select.Item>{/each}
-				</Select.Content>
-			</Select.Root>
+				onChange={(ns) => { selectedNamespace = ns; }}
+			/>
 
 			<div class="relative">
 				<Search class="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />

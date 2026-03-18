@@ -2,7 +2,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import NamespaceBadge from '$lib/components/namespace-badge.svelte';
 	import { Input } from '$lib/components/ui/input';
-	import * as Select from '$lib/components/ui/select';
+	import NamespaceSelect from '$lib/components/namespace-select.svelte';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Badge } from '$lib/components/ui/badge';
 	import ConfirmDelete from '$lib/components/confirm-delete.svelte';
@@ -244,26 +244,11 @@
 			</Button>
 		</div>
 		<div class="flex items-center gap-2">
-			<Select.Root
-				type="single"
+			<NamespaceSelect
+				{namespaces}
 				value={selectedNamespace}
-				onValueChange={(v: string) => {
-					if (v) {
-						selectedNamespace = v;
-						fetchIngresses();
-					}
-				}}
-			>
-				<Select.Trigger class="h-8 flex-1 text-xs sm:w-44">
-					{selectedNamespace === 'all' ? 'All namespaces' : selectedNamespace}
-				</Select.Trigger>
-				<Select.Content>
-					<Select.Item value="all">All namespaces</Select.Item>
-					{#each namespaces as ns}
-						<Select.Item value={ns}>{ns}</Select.Item>
-					{/each}
-				</Select.Content>
-			</Select.Root>
+				onChange={(ns) => { selectedNamespace = ns; fetchIngresses(); }}
+			/>
 			<div class="relative flex-1 sm:flex-none">
 				<Search
 					class="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground"
