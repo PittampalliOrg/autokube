@@ -3,6 +3,7 @@ import type { RequestHandler } from './$types';
 import { loadAuthConfig, patchAuthConfig } from '$lib/server/queries/auth-settings';
 import { logAuditEvent } from '$lib/server/queries/audit';
 import { authorize } from '$lib/server/services/authorize';
+import { adminExists } from '$lib/server/queries/users';
 
 export const GET: RequestHandler = async ({ cookies }) => {
 	const auth = await authorize(cookies);
@@ -26,6 +27,18 @@ export const PATCH: RequestHandler = async ({ request, getClientAddress, cookies
 	}
 	try {
 		const body = await request.json();
+
+		// Prevent enabling auth when no admin user exists
+		if (body.authEnabled === true) {
+			const hasAdmin = await adminExists();
+			if (!hasAdmin) {
+				return json(
+					{ error: 'Cannot enable authentication without an admin user. Create an admin user first.' },
+					{ status: 400 }
+				);
+			}
+		}
+
 		const updated = await patchAuthConfig(body);
 
 		await logAuditEvent({

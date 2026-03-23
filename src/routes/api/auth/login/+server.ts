@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
+import type { Cookies } from '@sveltejs/kit';
 import { scryptSync, timingSafeEqual, randomUUID, randomBytes } from 'crypto';
 import { findUserByUsername, insertUser } from '$lib/server/queries/users';
 import { createSession } from '$lib/server/queries/sessions';
@@ -7,6 +8,23 @@ import { loadAuthConfig } from '$lib/server/queries/auth-settings';
 import { listLdapProviders } from '$lib/server/queries/ldap';
 import { logAuditEvent } from '$lib/server/queries/audit';
 import { authenticateLdapUser } from '$lib/server/services/ldap-auth';
+import { encrypt } from '$lib/server/helpers/encryption';
+
+/** Set an encrypted, short-lived cookie that holds the MFA challenge state. */
+function setMfaPendingCookie(
+	cookies: Cookies,
+	userId: number,
+	provider: string
+) {
+	const payload = JSON.stringify({ userId, provider, exp: Date.now() + 5 * 60 * 1000 });
+	const encrypted = encrypt(payload)!;
+	cookies.set('mfa_pending', encrypted, {
+		httpOnly: true,
+		sameSite: 'lax',
+		path: '/',
+		maxAge: 300 // 5 minutes
+	});
+}
 
 function verifyPassword(plain: string, stored: string): boolean {
 	// SSO-only accounts cannot login via password
@@ -84,6 +102,12 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
 					return json({ error: 'Account is inactive' }, { status: 401 });
 				}
 
+				// Check if MFA is required
+				if (localUser.mfaEnabled) {
+					setMfaPendingCookie(cookies, localUser.id, 'ldap');
+					return json({ mfaRequired: true });
+				}
+
 				const sessionId = randomUUID();
 				const timeout = config.sessionTimeout ?? 86400;
 				const expiresAt = new Date(Date.now() + timeout * 1000).toISOString();
@@ -137,6 +161,12 @@ export const POST: RequestHandler = async ({ request, cookies, getClientAddress 
 				userAgent: request.headers.get('user-agent') ?? null
 			});
 			return json({ error: 'Invalid username or password' }, { status: 401 });
+		}
+
+		// Check if MFA is required
+		if (user.mfaEnabled) {
+			setMfaPendingCookie(cookies, user.id, 'local');
+			return json({ mfaRequired: true });
 		}
 
 		// Create session

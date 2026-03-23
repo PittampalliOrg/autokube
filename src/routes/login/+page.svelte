@@ -12,7 +12,7 @@
 		CardHeader,
 		CardTitle
 	} from '$lib/components/ui/card';
-	import { AlertCircle, LogIn, Globe, Server, ChevronLeft } from 'lucide-svelte';
+	import { AlertCircle, LogIn, Globe, Server, ChevronLeft, ShieldCheck, UserPlus } from 'lucide-svelte';
 	import { settingsStore } from '$lib/stores/settings.svelte';
 	import { mode } from 'mode-watcher';
 
@@ -34,6 +34,19 @@
 	let checking = $state(true);
 	let oidcProviders = $state<SsoProvider[]>([]);
 	let ldapProviders = $state<SsoProvider[]>([]);
+
+	// MFA state
+	let mfaRequired = $state(false);
+	let mfaCode = $state('');
+	let mfaLoading = $state(false);
+
+	// Setup state (first admin)
+	let needsSetup = $state(false);
+	let setupUsername = $state('');
+	let setupPassword = $state('');
+	let setupConfirmPassword = $state('');
+	let setupEmail = $state('');
+	let setupLoading = $state(false);
 
 	// Which provider the form is currently signed into
 	let activeProvider = $state<ActiveProvider>({ type: 'local' });
@@ -65,6 +78,18 @@
 			const settings = await res.json();
 
 			if (!settings.authEnabled) {
+				// Check if setup is needed even when auth is disabled
+				try {
+					const setupRes = await fetch('/api/auth/setup');
+					if (setupRes.ok) {
+						const setupData = await setupRes.json();
+						if (setupData.needsSetup) {
+							needsSetup = true;
+							checking = false;
+							return;
+						}
+					}
+				} catch { /* ignore */ }
 				await goto('/');
 				return;
 			}
@@ -74,6 +99,19 @@
 				await goto('/');
 				return;
 			}
+
+			// Check if setup is needed (auth enabled but no admin)
+			try {
+				const setupRes = await fetch('/api/auth/setup');
+				if (setupRes.ok) {
+					const setupData = await setupRes.json();
+					if (setupData.needsSetup) {
+						needsSetup = true;
+						checking = false;
+						return;
+					}
+				}
+			} catch { /* ignore */ }
 
 			// Load SSO providers for login page (public endpoint — no auth required)
 			try {
@@ -129,6 +167,14 @@
 				error = data.error || 'Invalid username or password';
 				return;
 			}
+
+			// Check if MFA is required
+			if (data.mfaRequired) {
+				mfaRequired = true;
+				mfaCode = '';
+				return;
+			}
+
 			await goto('/');
 		} catch (err) {
 			console.error('[Login] Error:', err);
@@ -151,6 +197,88 @@
 	function loginWithOidc(providerId: number) {
 		window.location.href = `/api/auth/oidc/${providerId}`;
 	}
+
+	async function handleMfaSubmit(e: Event) {
+		e.preventDefault();
+		error = '';
+
+		if (!mfaCode.trim()) {
+			error = 'Please enter your verification code';
+			return;
+		}
+
+		mfaLoading = true;
+		try {
+			const res = await fetch('/api/auth/mfa/validate', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ code: mfaCode.trim() })
+			});
+
+			const data = await res.json();
+			if (!res.ok) {
+				error = data.error || 'Invalid verification code';
+				return;
+			}
+			await goto('/');
+		} catch (err) {
+			console.error('[Login] MFA error:', err);
+			error = 'Something went wrong. Please try again.';
+		} finally {
+			mfaLoading = false;
+		}
+	}
+
+	function cancelMfa() {
+		mfaRequired = false;
+		mfaCode = '';
+		password = '';
+		error = '';
+	}
+
+	async function handleSetup(e: Event) {
+		e.preventDefault();
+		error = '';
+
+		if (!setupUsername.trim()) {
+			error = 'Username is required';
+			return;
+		}
+		if (!setupPassword || setupPassword.length < 8) {
+			error = 'Password must be at least 8 characters';
+			return;
+		}
+		if (setupPassword !== setupConfirmPassword) {
+			error = 'Passwords do not match';
+			return;
+		}
+
+		setupLoading = true;
+		try {
+			const res = await fetch('/api/auth/setup', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					username: setupUsername.trim(),
+					password: setupPassword,
+					email: setupEmail.trim() || undefined
+				})
+			});
+
+			const data = await res.json();
+			if (!res.ok) {
+				error = data.error || 'Setup failed';
+				return;
+			}
+
+			await goto('/');
+		} catch (err) {
+			console.error('[Setup] Error:', err);
+			error = 'Something went wrong. Please try again.';
+		} finally {
+			setupLoading = false;
+		}
+	}
 </script>
 
 <svelte:head>
@@ -171,12 +299,24 @@
 			<CardHeader class="space-y-1 pb-3">
 				<div class="mb-2 flex items-center justify-center">
 					<div class="flex size-10 items-center justify-center rounded-lg bg-primary/10">
-						<span class="text-xl font-bold text-primary">AK</span>
+						{#if needsSetup}
+							<UserPlus class="size-5 text-primary" />
+						{:else if mfaRequired}
+							<ShieldCheck class="size-5 text-primary" />
+						{:else}
+							<span class="text-xl font-bold text-primary">AK</span>
+						{/if}
 					</div>
 				</div>
-				<CardTitle class="text-center text-xl">Welcome to AutoKube</CardTitle>
+				<CardTitle class="text-center text-xl">
+					{needsSetup ? 'Set Up AutoKube' : mfaRequired ? 'Two-Factor Authentication' : 'Welcome to AutoKube'}
+				</CardTitle>
 				<CardDescription class="text-center text-xs">
-					{#if activeProvider.type === 'ldap'}
+					{#if needsSetup}
+						Create your admin account to get started
+					{:else if mfaRequired}
+						Enter the 6-digit code from your authenticator app
+					{:else if activeProvider.type === 'ldap'}
 						Signing in with <strong>{activeProvider.name}</strong>
 					{:else}
 						Sign in to continue
@@ -184,6 +324,137 @@
 				</CardDescription>
 			</CardHeader>
 			<CardContent>
+
+			{#if needsSetup}
+				<!-- ── First admin setup form ── -->
+				<form onsubmit={handleSetup} class="space-y-3">
+					<div class="rounded-lg border bg-muted/50 p-3">
+						<p class="text-[11px] leading-relaxed text-muted-foreground">
+							No admin account exists yet. Create one to enable authentication and secure your AutoKube instance.
+						</p>
+					</div>
+					<div class="space-y-1.5">
+						<Label for="setup-username" class="text-xs">Username</Label>
+						<Input
+							id="setup-username"
+							type="text"
+							placeholder="admin"
+							bind:value={setupUsername}
+							disabled={setupLoading}
+							autocomplete="username"
+							class="h-9"
+						/>
+					</div>
+					<div class="space-y-1.5">
+						<Label for="setup-email" class="text-xs">Email <span class="text-muted-foreground">(optional)</span></Label>
+						<Input
+							id="setup-email"
+							type="email"
+							placeholder="admin@example.com"
+							bind:value={setupEmail}
+							disabled={setupLoading}
+							autocomplete="email"
+							class="h-9"
+						/>
+					</div>
+					<div class="space-y-1.5">
+						<Label for="setup-password" class="text-xs">Password</Label>
+						<Input
+							id="setup-password"
+							type="password"
+							placeholder="Min. 8 characters"
+							bind:value={setupPassword}
+							disabled={setupLoading}
+							autocomplete="new-password"
+							class="h-9"
+						/>
+					</div>
+					<div class="space-y-1.5">
+						<Label for="setup-confirm" class="text-xs">Confirm Password</Label>
+						<Input
+							id="setup-confirm"
+							type="password"
+							placeholder="Repeat password"
+							bind:value={setupConfirmPassword}
+							disabled={setupLoading}
+							autocomplete="new-password"
+							class="h-9"
+						/>
+					</div>
+
+					{#if error}
+						<div class="flex items-center gap-2 rounded-md border border-destructive/20 bg-destructive/10 p-2.5">
+							<AlertCircle class="size-3.5 shrink-0 text-destructive" />
+							<p class="text-xs text-destructive">{error}</p>
+						</div>
+					{/if}
+
+					<Button
+						type="submit"
+						class="h-9 w-full gap-1.5"
+						disabled={setupLoading || !setupUsername.trim() || !setupPassword || !setupConfirmPassword}
+					>
+						{#if setupLoading}
+							Creating account...
+						{:else}
+							<UserPlus class="size-3.5" />
+							Create Admin & Enable Auth
+						{/if}
+					</Button>
+				</form>
+
+			{:else if mfaRequired}
+				<!-- ── MFA verification form ── -->
+				<form onsubmit={handleMfaSubmit} class="space-y-3">
+					<div class="space-y-1.5">
+						<Label for="mfa-code" class="text-xs">Verification Code</Label>
+						<Input
+							id="mfa-code"
+							type="text"
+							inputmode="numeric"
+							placeholder="000000"
+							bind:value={mfaCode}
+							disabled={mfaLoading}
+							autocomplete="one-time-code"
+							maxlength={8}
+							class="h-9 text-center font-mono text-lg tracking-widest"
+						/>
+						<p class="text-[10px] text-muted-foreground">
+							You can also enter a backup code
+						</p>
+					</div>
+
+					{#if error}
+						<div
+							class="flex items-center gap-2 rounded-md border border-destructive/20 bg-destructive/10 p-2.5"
+						>
+							<AlertCircle class="size-3.5 shrink-0 text-destructive" />
+							<p class="text-xs text-destructive">{error}</p>
+						</div>
+					{/if}
+
+					<Button
+						type="submit"
+						class="h-9 w-full gap-1.5"
+						disabled={mfaLoading || !mfaCode.trim()}
+					>
+						{#if mfaLoading}
+							Verifying...
+						{:else}
+							<ShieldCheck class="size-3.5" />
+							Verify
+						{/if}
+					</Button>
+
+					<button
+						type="button"
+						class="flex w-full items-center justify-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+						onclick={cancelMfa}
+					>
+						<ChevronLeft class="size-3" /> Back to login
+					</button>
+				</form>
+			{:else}
 
 				<!-- ── Provider picker (shown when SSO providers exist and no provider selected yet) ── -->
 				{#if hasExternalProviders && activeProvider.type === 'local'}
@@ -291,6 +562,7 @@
 						{/if}
 					</Button>
 				</form>
+			{/if}
 			</CardContent>
 		</Card>
 	</div>

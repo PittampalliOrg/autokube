@@ -21,6 +21,7 @@ export interface AuthenticatedUser {
 	avatar: string | null;
 	authProvider: string | null;
 	isAdmin: boolean;
+	mfaEnabled: boolean;
 }
 
 export interface AuthorizationContext {
@@ -126,7 +127,8 @@ async function validateSession(cookies: Cookies): Promise<AuthenticatedUser | nu
 		displayName: user.displayName,
 		avatar: user.avatar,
 		authProvider: user.authProvider,
-		isAdmin
+		isAdmin,
+		mfaEnabled: user.mfaEnabled ?? false
 	};
 }
 

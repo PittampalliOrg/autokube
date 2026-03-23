@@ -80,6 +80,8 @@ export const handle: Handle = async ({ event, resolve }) => {
 	const publicPaths = [
 		'/login',
 		'/api/auth/login',
+		'/api/auth/setup',
+		'/api/auth/mfa/validate',
 		'/api/auth/oidc',
 		'/api/auth-settings',
 		'/api/agent/status',

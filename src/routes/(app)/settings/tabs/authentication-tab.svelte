@@ -8,6 +8,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Skeleton } from '$lib/components/ui/skeleton';
 	import * as Dialog from '$lib/components/ui/dialog';
+	import * as Tabs from '$lib/components/ui/tabs';
 	import {
 		AlertDialog,
 		AlertDialogAction,
@@ -34,10 +35,14 @@
 		Globe,
 		CheckCircle2,
 		XCircle,
-		Loader2
+		Loader2,
+		ShieldOff,
+		Smartphone
 	} from 'lucide-svelte';
 	import UserDialog from '$lib/components/user-dialog.svelte';
 	import RoleDialog from '$lib/components/role-dialog.svelte';
+	import MfaDisableDialog from '$lib/components/mfa-disable-dialog.svelte';
+	import MfaSetupDialog from '$lib/components/mfa-setup-dialog.svelte';
 	import EnterpriseFeatureLock from '$lib/components/enterprise-feature-lock.svelte';
 	import { authSettingsStore } from '$lib/stores/auth-settings.svelte';
 	import { usersStore } from '$lib/stores/users.svelte';
@@ -66,6 +71,46 @@
 	let editingRole = $state<ResolvedRole | null>(null);
 	let hasValidLicense = $state(false);
 	let licenseChecked = $state(false);
+	let authSubTab = $state('users');
+
+	// ── MFA self-service (Security sub-tab) ─────────────────────────────────
+	let mfaLoading = $state(true);
+	let mfaSelfEnabled = $state(false);
+	let mfaUsername = $state('');
+	let mfaSetupOpen = $state(false);
+	let mfaDisableSelfOpen = $state(false);
+
+	async function fetchMfaStatus() {
+		mfaLoading = true;
+		try {
+			const res = await fetch('/api/auth/me');
+			if (!res.ok) return;
+			const data = await res.json();
+			if (data.user) {
+				mfaSelfEnabled = data.user.mfaEnabled ?? false;
+				mfaUsername = data.user.username ?? '';
+			}
+		} catch (err) {
+			console.error('[Security] Failed to fetch user status:', err);
+		} finally {
+			mfaLoading = false;
+		}
+	}
+
+	function handleMfaSelfEnabled() {
+		mfaSelfEnabled = true;
+		mfaSetupOpen = false;
+	}
+
+	function handleMfaSelfDisabled() {
+		mfaSelfEnabled = false;
+		mfaDisableSelfOpen = false;
+	}
+
+	// MFA disable dialog state
+	let mfaDisableDialogOpen = $state(false);
+	let mfaDisableTargetUserId = $state<number | null>(null);
+	let mfaDisableTargetUsername = $state('');
 
 	// ── SSO state ────────────────────────────────────────────────────────────
 	let ldapProviders = $state<LdapUI[]>([]);
@@ -135,13 +180,16 @@
 		try {
 			const res = await fetch('/api/license');
 			const data = await res.json();
-			hasValidLicense = data.active && (data.payload?.type === 'professional' || data.payload?.type === 'enterprise');
+			hasValidLicense =
+				data.active &&
+				(data.payload?.type === 'professional' || data.payload?.type === 'enterprise');
 		} catch {
 			hasValidLicense = false;
 		} finally {
 			licenseChecked = true;
 		}
 		if (hasValidLicense) loadSsoProviders();
+		fetchMfaStatus();
 	});
 
 	async function loadSsoProviders() {
@@ -345,8 +393,14 @@
 	async function handleToggleAuth(enabled: boolean) {
 		try {
 			await authSettings.updateSettings({ authEnabled: enabled });
+			if (enabled) {
+				toast.success('Authentication enabled');
+			}
 		} catch (err) {
 			console.error('[Auth Tab] Toggle error:', err);
+			toast.error(
+				'Cannot enable authentication without an admin user. Create a user with the Admin role first.'
+			);
 		}
 	}
 
@@ -402,7 +456,11 @@
 		}
 	}
 
-	async function handleSaveRole(data: { name: string; description: string; permissions: PermissionMap }) {
+	async function handleSaveRole(data: {
+		name: string;
+		description: string;
+		permissions: PermissionMap;
+	}) {
 		if (editingRole) {
 			await roles.updateRole(editingRole.id, data);
 		} else {
@@ -416,6 +474,22 @@
 
 	async function handleDeleteRole(roleId: number) {
 		await roles.deleteRole(roleId);
+	}
+
+	function openMfaDisableDialog(userId: number, username: string) {
+		mfaDisableTargetUserId = userId;
+		mfaDisableTargetUsername = username;
+		mfaDisableDialogOpen = true;
+	}
+
+	function closeMfaDisableDialog() {
+		mfaDisableDialogOpen = false;
+		mfaDisableTargetUserId = null;
+		mfaDisableTargetUsername = '';
+	}
+
+	function handleMfaDisabled() {
+		users.loadUsers();
 	}
 
 	function getRoleName(roleId: number | null) {
@@ -478,557 +552,731 @@
 	</div>
 {/if}
 
-<!-- Users -->
-<div class="mt-6 flex items-start justify-between">
-	<div>
-		<div class="flex items-center gap-2">
-			<h2 class="text-lg font-semibold">Users</h2>
-			{#if !users.loading}
-				<Badge variant="secondary" class="text-xs">
-					{users.users.length}
-				</Badge>
-			{/if}
-		</div>
-		<p class="mt-0.5 text-sm text-muted-foreground">
-			Manage who has access and their assigned role
-		</p>
-	</div>
-	<Button size="sm" class="shrink-0 gap-1.5 text-xs" onclick={openAddUserDialog}>
-		<UserPlus class="size-3" />
-		Add User
-	</Button>
-</div>
+<!-- ── Sub-tabs: Users · Roles · SSO ──────────────────────────────────────── -->
+<Tabs.Root bind:value={authSubTab} class="mt-6">
+	<Tabs.List>
+		<Tabs.Trigger value="users" class="gap-1.5">
+			<Users class="size-3.5" />
+			Users
+		</Tabs.Trigger>
+				<Tabs.Trigger value="security" class="gap-1.5">
+			<ShieldCheck class="size-3.5" />
+			Security
+		</Tabs.Trigger>
+		<Tabs.Trigger value="roles" class="gap-1.5">
+			<Shield class="size-3.5" />
+			Roles
+		</Tabs.Trigger>
+		<Tabs.Trigger value="sso" class="gap-1.5">
+			<Globe class="size-3.5" />
+			SSO
+		</Tabs.Trigger>
 
-<div class="mt-4 space-y-2">
-	{#if users.loading}
-		{#each Array.from({ length: 3 }, (_, index) => index) as index (index)}
-			<div class="flex items-center gap-4 rounded-lg border bg-card px-4 py-3">
-				<Skeleton class="size-9 rounded-full" />
-				<div class="flex-1 space-y-1.5">
-					<Skeleton class="h-3.5 w-32" />
-					<Skeleton class="h-3 w-48" />
+	</Tabs.List>
+
+	<!-- ── Users tab ──────────────────────────────────────────────────────── -->
+	<Tabs.Content value="users" class="mt-4">
+		<!-- Users -->
+		<div class="flex items-start justify-between">
+			<div>
+				<div class="flex items-center gap-2">
+					<h2 class="text-lg font-semibold">Users</h2>
 				</div>
-				<Skeleton class="h-5 w-16 rounded-full" />
+				<p class="mt-0.5 text-sm text-muted-foreground">
+					Manage who has access and their assigned role
+				</p>
 			</div>
-		{/each}
-	{:else if users.error}
-		<div
-			class="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-xs text-destructive"
-		>
-			<AlertCircle class="size-4" />
-			Failed to load users.
-		</div>
-	{:else if users.users.length === 0}
-		<div
-			class="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-12"
-		>
-			<Users class="size-8 text-muted-foreground/50" />
-			<p class="text-sm text-muted-foreground">No users yet</p>
-			<Button size="sm" variant="outline" class="gap-1.5 text-xs" onclick={openAddUserDialog}>
-				<UserPlus class="size-3" /> Add your first user
+			<Button size="sm" class="shrink-0 gap-1.5 text-xs" onclick={openAddUserDialog}>
+				<UserPlus class="size-3" />
+				Add User
 			</Button>
 		</div>
-	{:else}
-		{#each users.users as user (user.id)}
-			<div class="flex items-center gap-4 rounded-lg border bg-card px-4 py-3">
-				<!-- Avatar -->
+
+		<div class="mt-4 space-y-2">
+			{#if users.loading}
+				{#each Array.from({ length: 3 }, (_, index) => index) as index (index)}
+					<div class="flex items-center gap-4 rounded-lg border bg-card px-4 py-3">
+						<Skeleton class="size-9 rounded-full" />
+						<div class="flex-1 space-y-1.5">
+							<Skeleton class="h-3.5 w-32" />
+							<Skeleton class="h-3 w-48" />
+						</div>
+						<Skeleton class="h-5 w-16 rounded-full" />
+					</div>
+				{/each}
+			{:else if users.error}
 				<div
-					class="flex size-9 shrink-0 items-center justify-center rounded-full border bg-primary/10 text-xs font-semibold text-primary"
+					class="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-xs text-destructive"
 				>
-					{getUserAvatar(user.displayName || user.username)}
+					<AlertCircle class="size-4" />
+					Failed to load users.
 				</div>
-
-				<!-- Info -->
-				<div class="min-w-0 flex-1">
-					<div class="flex flex-wrap items-center gap-1.5">
-						<span class="text-sm font-medium">{user.displayName || user.username}</span>
-						<span class="text-xs text-muted-foreground">@{user.username}</span>
-						{#if !user.isActive}
-							<Badge
-								variant="outline"
-								class="border-muted-foreground/30 text-[10px] text-muted-foreground"
-							>
-								inactive
-							</Badge>
-						{/if}
-						<Badge variant="secondary" class="text-[10px]">
-							{user.roleName ?? getRoleName(user.roleId)}
-						</Badge>
-					</div>
-					<div class="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-						{#if user.email}
-							<span>{user.email}</span>
-						{/if}
-						{#if user.lastLogin}
-							<span>•</span>
-							<span>Last login: {new Date(user.lastLogin).toLocaleDateString()}</span>
-						{/if}
-					</div>
-				</div>
-
-				<!-- Actions -->
-				<div class="flex shrink-0 items-center gap-1">
-					<Button
-						variant="ghost"
-						size="icon"
-						class="size-7 text-muted-foreground hover:text-foreground"
-						onclick={() => openEditUserDialog(user)}
-					>
-						<Pencil class="size-3.5" />
+			{:else if users.users.length === 0}
+				<div
+					class="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-12"
+				>
+					<Users class="size-8 text-muted-foreground/50" />
+					<p class="text-sm text-muted-foreground">No users yet</p>
+					<Button size="sm" variant="outline" class="gap-1.5 text-xs" onclick={openAddUserDialog}>
+						<UserPlus class="size-3" /> Add your first user
 					</Button>
-					<AlertDialog>
-						<AlertDialogTrigger>
-							{#snippet child({ props })}
+				</div>
+			{:else}
+				{#each users.users as user (user.id)}
+					<div class="flex items-center gap-4 rounded-lg border bg-card px-4 py-3">
+						<!-- Avatar -->
+						<div
+							class="flex size-9 shrink-0 items-center justify-center rounded-full border bg-primary/10 text-xs font-semibold text-primary"
+						>
+							{getUserAvatar(user.displayName || user.username)}
+						</div>
+
+						<!-- Info -->
+						<div class="min-w-0 flex-1">
+							<div class="flex flex-wrap items-center gap-1.5">
+								<span class="text-sm font-medium">{user.displayName || user.username}</span>
+								<span class="text-xs text-muted-foreground">@{user.username}</span>
+								{#if !user.isActive}
+									<Badge
+										variant="outline"
+										class="border-muted-foreground/30 text-[10px] text-muted-foreground"
+									>
+										inactive
+									</Badge>
+								{/if}
+								{#if user.mfaEnabled}
+									<Badge
+										variant="outline"
+										class="border-green-500/30 text-[10px] text-green-600 dark:text-green-400"
+									>
+										<ShieldCheck class="mr-0.5 size-2.5" />
+										MFA
+									</Badge>
+								{/if}
+								<Badge variant="secondary" class="text-[10px]">
+									{user.roleName ?? getRoleName(user.roleId)}
+								</Badge>
+							</div>
+							<div class="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+								{#if user.email}
+									<span>{user.email}</span>
+								{/if}
+								{#if user.lastLogin}
+									<span>•</span>
+									<span>Last login: {new Date(user.lastLogin).toLocaleDateString()}</span>
+								{/if}
+							</div>
+						</div>
+
+						<!-- Actions -->
+						<div class="flex shrink-0 items-center gap-1">
+							{#if user.mfaEnabled}
 								<Button
-									{...props}
 									variant="ghost"
 									size="icon"
-									class="size-7 text-muted-foreground hover:text-destructive"
+									class="size-7 text-muted-foreground hover:text-orange-500"
+									title="Reset MFA"
+									onclick={() => openMfaDisableDialog(user.id, user.displayName || user.username)}
 								>
-									<Trash2 class="size-3.5" />
+									<ShieldOff class="size-3.5" />
 								</Button>
-							{/snippet}
-						</AlertDialogTrigger>
-						<AlertDialogContent>
-							<AlertDialogHeader>
-								<AlertDialogTitle>Delete user?</AlertDialogTitle>
-								<AlertDialogDescription class="text-xs">
-									<strong>{user.displayName || user.username}</strong> will immediately lose access to
-									AutoKube.
-								</AlertDialogDescription>
-							</AlertDialogHeader>
-							<AlertDialogFooter>
-								<AlertDialogCancel class="h-8 text-xs">Cancel</AlertDialogCancel>
-								<AlertDialogAction
-									class="text-destructive-foreground h-8 bg-destructive text-xs hover:bg-destructive/90"
-									onclick={() => handleDeleteUser(user.id)}
-								>
-									Delete
-								</AlertDialogAction>
-							</AlertDialogFooter>
-						</AlertDialogContent>
-					</AlertDialog>
-				</div>
-			</div>
-		{/each}
-	{/if}
-</div>
-
-<!-- Roles -->
-<div class="mt-6">
-	<div class="flex items-center gap-2 mb-1">
-		<Badge
-			class="h-5 gap-0.5 rounded-md border-0 bg-linear-to-r from-amber-400 to-yellow-500 px-1.5 text-[10px] font-bold text-black shadow-sm"
-		>
-			<Sparkles class="size-3" />
-			Pro
-		</Badge>
-		<h2 class="text-lg font-semibold">Roles</h2>
-		{#if hasValidLicense && !roles.loading}
-			<Badge variant="secondary" class="text-xs">
-				{roles.roles.length}
-			</Badge>
-		{/if}
-	</div>
-	<p class="mt-0.5 text-sm text-muted-foreground">
-		Define roles with system and cluster-level permissions
-	</p>
-</div>
-
-{#if !licenseChecked}
-	<div class="mt-4 flex items-center justify-center py-8">
-		<Skeleton class="h-32 w-full rounded-lg" />
-	</div>
-{:else if !hasValidLicense}
-	<div class="mt-4">
-		<EnterpriseFeatureLock
-			inline
-			featureName="Roles"
-			description="Define custom roles with granular permissions to control who can access what in AutoKube."
-			features={['Custom role definitions', 'Granular permission control', 'Cluster-scoped access', 'User role assignment']}
-		/>
-	</div>
-{:else}
-<div class="mt-2 flex justify-end">
-	<Button size="sm" class="shrink-0 gap-1.5 text-xs" onclick={openAddRoleDialog}>
-		<Plus class="size-3" />
-		New Role
-	</Button>
-</div>
-
-<div class="mt-4 space-y-2">
-	{#if roles.loading}
-		{#each Array.from({ length: 3 }, (_, index) => index) as index (index)}
-			<div class="flex items-center gap-4 rounded-lg border bg-card px-4 py-3">
-				<Skeleton class="size-9 rounded-full" />
-				<div class="flex-1 space-y-1.5">
-					<Skeleton class="h-3.5 w-24" />
-					<Skeleton class="h-3 w-40" />
-				</div>
-				<Skeleton class="h-5 w-20 rounded-full" />
-			</div>
-		{/each}
-	{:else if roles.error}
-		<div
-			class="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-xs text-destructive"
-		>
-			<AlertCircle class="size-4" />
-			Failed to load roles.
-		</div>
-	{:else if roles.roles.length === 0}
-		<div
-			class="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-12"
-		>
-			<Shield class="size-8 text-muted-foreground/50" />
-			<p class="text-sm text-muted-foreground">No roles defined yet</p>
-			<Button size="sm" variant="outline" class="gap-1.5 text-xs" onclick={openAddRoleDialog}>
-				<Plus class="size-3" /> Create your first role
-			</Button>
-		</div>
-	{:else}
-		{#each roles.roles as role (role.id)}
-			{@const totalPerms = getTotalPermissions(role)}
-			<div class="flex items-center gap-4 rounded-lg border bg-card px-4 py-3">
-				<!-- Icon -->
-				<div class="flex size-9 shrink-0 items-center justify-center rounded-full border bg-muted">
-					<Shield class="size-4 text-muted-foreground" />
-				</div>
-
-				<!-- Info -->
-				<div class="min-w-0 flex-1">
-					<div class="flex flex-wrap items-center gap-1.5">
-						<span class="text-sm font-medium">{role.name}</span>
-						{#if role.isSystem}
-							<Badge
-								variant="outline"
-								class="border-muted-foreground/30 text-[10px] text-muted-foreground"
+							{/if}
+							<Button
+								variant="ghost"
+								size="icon"
+								class="size-7 text-muted-foreground hover:text-foreground"
+								onclick={() => openEditUserDialog(user)}
 							>
-								system
-							</Badge>
-						{/if}
-						<Badge variant="secondary" class="text-[10px]">
-							{role.userCount}
-							{role.userCount === 1 ? 'user' : 'users'}
-						</Badge>
+								<Pencil class="size-3.5" />
+							</Button>
+							<AlertDialog>
+								<AlertDialogTrigger>
+									{#snippet child({ props })}
+										<Button
+											{...props}
+											variant="ghost"
+											size="icon"
+											class="size-7 text-muted-foreground hover:text-destructive"
+										>
+											<Trash2 class="size-3.5" />
+										</Button>
+									{/snippet}
+								</AlertDialogTrigger>
+								<AlertDialogContent>
+									<AlertDialogHeader>
+										<AlertDialogTitle>Delete user?</AlertDialogTitle>
+										<AlertDialogDescription class="text-xs">
+											<strong>{user.displayName || user.username}</strong> will immediately lose access
+											to AutoKube.
+										</AlertDialogDescription>
+									</AlertDialogHeader>
+									<AlertDialogFooter>
+										<AlertDialogCancel class="h-8 text-xs">Cancel</AlertDialogCancel>
+										<AlertDialogAction
+											class="text-destructive-foreground h-8 bg-destructive text-xs hover:bg-destructive/90"
+											onclick={() => handleDeleteUser(user.id)}
+										>
+											Delete
+										</AlertDialogAction>
+									</AlertDialogFooter>
+								</AlertDialogContent>
+							</AlertDialog>
+						</div>
 					</div>
-					<div class="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-						{#if role.description}
-							<span>{role.description}</span>
-							<span>•</span>
+				{/each}
+			{/if}
+		</div>
+	</Tabs.Content>
+
+		<!-- ── Security tab ──────────────────────────────────────────────────── -->
+	<Tabs.Content value="security" class="mt-4">
+		<div class="space-y-6">
+			<div>
+				<h2 class="text-lg font-semibold">Two-Factor Authentication</h2>
+				<p class="mt-0.5 text-sm text-muted-foreground">
+					Add an extra layer of security to your account using an authenticator app.
+				</p>
+			</div>
+
+			{#if mfaLoading}
+				<div class="flex items-center justify-center py-8">
+					<Loader2 class="size-5 animate-spin text-muted-foreground" />
+				</div>
+			{:else if !authEnabled}
+				<div class="rounded-lg border bg-muted/50 p-4">
+					<p class="text-sm text-muted-foreground">
+						Authentication is not enabled. MFA settings are only available when authentication is
+						active.
+					</p>
+				</div>
+			{:else}
+				<div class="flex items-center justify-between rounded-lg border p-4">
+					<div class="flex items-center gap-3">
+						<div
+							class="flex size-10 items-center justify-center rounded-lg {mfaSelfEnabled
+								? 'bg-green-500/10'
+								: 'bg-muted'}"
+						>
+							{#if mfaSelfEnabled}
+								<ShieldCheck class="size-5 text-green-600 dark:text-green-400" />
+							{:else}
+								<Smartphone class="size-5 text-muted-foreground" />
+							{/if}
+						</div>
+						<div>
+							<div class="flex items-center gap-2">
+								<p class="text-sm font-medium">Authenticator App (TOTP)</p>
+								{#if mfaSelfEnabled}
+									<Badge
+										variant="secondary"
+										class="bg-green-500/10 text-xs text-green-600 dark:text-green-400"
+									>
+										Enabled
+									</Badge>
+								{:else}
+									<Badge variant="secondary" class="text-xs">Disabled</Badge>
+								{/if}
+							</div>
+							<p class="text-xs text-muted-foreground">
+								{#if mfaSelfEnabled}
+									Your account is protected with two-factor authentication.
+								{:else}
+									Use Google Authenticator, Authy, or a compatible app to generate verification
+									codes.
+								{/if}
+							</p>
+						</div>
+					</div>
+					<div>
+						{#if mfaSelfEnabled}
+							<Button
+								variant="outline"
+								size="sm"
+								class="gap-1.5 text-xs text-destructive hover:text-destructive"
+								onclick={() => (mfaDisableSelfOpen = true)}
+							>
+								<ShieldOff class="size-3" />
+								Disable
+							</Button>
+						{:else}
+							<Button size="sm" class="gap-1.5 text-xs" onclick={() => (mfaSetupOpen = true)}>
+								<ShieldCheck class="size-3" />
+								Enable
+							</Button>
 						{/if}
-						<span>{totalPerms} permissions</span>
 					</div>
 				</div>
 
-				<!-- Actions -->
-				<div class="flex shrink-0 items-center gap-1">
-					<Button
-						variant="ghost"
-						size="icon"
-						class="size-7 text-muted-foreground hover:text-foreground"
-						onclick={() => openEditRoleDialog(role)}
+				{#if mfaSelfEnabled}
+					<div class="rounded-lg border border-yellow-500/20 bg-yellow-500/10 p-3">
+						<p class="text-xs text-yellow-600 dark:text-yellow-400">
+							<strong>Backup codes:</strong> If you lose access to your authenticator app, you can use
+							a backup code to sign in. Backup codes were provided when you first enabled MFA. If you've
+							used all your codes, disable and re-enable MFA to generate new ones.
+						</p>
+					</div>
+				{/if}
+
+				{#if !mfaSelfEnabled}
+					<div class="rounded-lg border bg-muted/50 p-3">
+						<p class="text-xs leading-relaxed text-muted-foreground">
+							Two-factor authentication adds an extra layer of security by requiring a verification
+							code from an authenticator app in addition to your password. This is strongly
+							recommended for all accounts, especially those with administrative access.
+						</p>
+					</div>
+				{/if}
+			{/if}
+		</div>
+	</Tabs.Content>
+
+	<!-- ── Roles tab ─────────────────────────────────────────────────────── -->
+	<Tabs.Content value="roles" class="mt-4">
+		<!-- Roles -->
+		<div>
+			<div class="mb-1 flex items-center gap-2">
+				<Badge
+					class="h-5 gap-0.5 rounded-md border-0 bg-linear-to-r from-amber-400 to-yellow-500 px-1.5 text-[10px] font-bold text-black shadow-sm"
+				>
+					<Sparkles class="size-3" />
+					Pro
+				</Badge>
+				<h2 class="text-lg font-semibold">Roles</h2>
+				{#if hasValidLicense && !roles.loading}
+					<Badge variant="secondary" class="text-xs">
+						{roles.roles.length}
+					</Badge>
+				{/if}
+			</div>
+			<p class="mt-0.5 text-sm text-muted-foreground">
+				Define roles with system and cluster-level permissions
+			</p>
+		</div>
+
+		{#if !licenseChecked}
+			<div class="mt-4 flex items-center justify-center py-8">
+				<Skeleton class="h-32 w-full rounded-lg" />
+			</div>
+		{:else if !hasValidLicense}
+			<div class="mt-4">
+				<EnterpriseFeatureLock
+					inline
+					featureName="Roles"
+					description="Define custom roles with granular permissions to control who can access what in AutoKube."
+					features={[
+						'Custom role definitions',
+						'Granular permission control',
+						'Cluster-scoped access',
+						'User role assignment'
+					]}
+				/>
+			</div>
+		{:else}
+			<div class="mt-2 flex justify-end">
+				<Button size="sm" class="shrink-0 gap-1.5 text-xs" onclick={openAddRoleDialog}>
+					<Plus class="size-3" />
+					New Role
+				</Button>
+			</div>
+
+			<div class="mt-4 space-y-2">
+				{#if roles.loading}
+					{#each Array.from({ length: 3 }, (_, index) => index) as index (index)}
+						<div class="flex items-center gap-4 rounded-lg border bg-card px-4 py-3">
+							<Skeleton class="size-9 rounded-full" />
+							<div class="flex-1 space-y-1.5">
+								<Skeleton class="h-3.5 w-24" />
+								<Skeleton class="h-3 w-40" />
+							</div>
+							<Skeleton class="h-5 w-20 rounded-full" />
+						</div>
+					{/each}
+				{:else if roles.error}
+					<div
+						class="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-xs text-destructive"
 					>
-						<Pencil class="size-3.5" />
+						<AlertCircle class="size-4" />
+						Failed to load roles.
+					</div>
+				{:else if roles.roles.length === 0}
+					<div
+						class="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed py-12"
+					>
+						<Shield class="size-8 text-muted-foreground/50" />
+						<p class="text-sm text-muted-foreground">No roles defined yet</p>
+						<Button size="sm" variant="outline" class="gap-1.5 text-xs" onclick={openAddRoleDialog}>
+							<Plus class="size-3" /> Create your first role
+						</Button>
+					</div>
+				{:else}
+					{#each roles.roles as role (role.id)}
+						{@const totalPerms = getTotalPermissions(role)}
+						<div class="flex items-center gap-4 rounded-lg border bg-card px-4 py-3">
+							<!-- Icon -->
+							<div
+								class="flex size-9 shrink-0 items-center justify-center rounded-full border bg-muted"
+							>
+								<Shield class="size-4 text-muted-foreground" />
+							</div>
+
+							<!-- Info -->
+							<div class="min-w-0 flex-1">
+								<div class="flex flex-wrap items-center gap-1.5">
+									<span class="text-sm font-medium">{role.name}</span>
+									{#if role.isSystem}
+										<Badge
+											variant="outline"
+											class="border-muted-foreground/30 text-[10px] text-muted-foreground"
+										>
+											system
+										</Badge>
+									{/if}
+									<Badge variant="secondary" class="text-[10px]">
+										{role.userCount}
+										{role.userCount === 1 ? 'user' : 'users'}
+									</Badge>
+								</div>
+								<div class="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+									{#if role.description}
+										<span>{role.description}</span>
+										<span>•</span>
+									{/if}
+									<span>{totalPerms} permissions</span>
+								</div>
+							</div>
+
+							<!-- Actions -->
+							<div class="flex shrink-0 items-center gap-1">
+								<Button
+									variant="ghost"
+									size="icon"
+									class="size-7 text-muted-foreground hover:text-foreground"
+									onclick={() => openEditRoleDialog(role)}
+								>
+									<Pencil class="size-3.5" />
+								</Button>
+								{#if !role.isSystem}
+									<AlertDialog>
+										<AlertDialogTrigger>
+											{#snippet child({ props })}
+												<Button
+													{...props}
+													variant="ghost"
+													size="icon"
+													class="size-7 text-muted-foreground hover:text-destructive"
+												>
+													<Trash2 class="size-3.5" />
+												</Button>
+											{/snippet}
+										</AlertDialogTrigger>
+										<AlertDialogContent>
+											<AlertDialogHeader>
+												<AlertDialogTitle>Delete role?</AlertDialogTitle>
+												<AlertDialogDescription class="text-xs">
+													The <strong>{role.name}</strong> role will be removed and users assigned to
+													it will lose this role.
+												</AlertDialogDescription>
+											</AlertDialogHeader>
+											<AlertDialogFooter>
+												<AlertDialogCancel class="h-8 text-xs">Cancel</AlertDialogCancel>
+												<AlertDialogAction
+													class="text-destructive-foreground h-8 bg-destructive text-xs hover:bg-destructive/90"
+													onclick={() => handleDeleteRole(role.id)}
+												>
+													Delete
+												</AlertDialogAction>
+											</AlertDialogFooter>
+										</AlertDialogContent>
+									</AlertDialog>
+								{/if}
+							</div>
+						</div>
+					{/each}
+				{/if}
+			</div>
+		{/if}
+	</Tabs.Content>
+
+	<!-- ── SSO tab ────────────────────────────────────────────────────────── -->
+	<Tabs.Content value="sso" class="mt-4">
+		<!-- ── SSO / Enterprise Auth ─────────────────────────────────────────────── -->
+		<div>
+			<div class="mb-1 flex items-center gap-2">
+				<Badge
+					class="h-5 gap-0.5 rounded-md border-0 bg-linear-to-r from-amber-400 to-yellow-500 px-1.5 text-[10px] font-bold text-black shadow-sm"
+				>
+					<Sparkles class="size-3" />
+					Pro
+				</Badge>
+				<h2 class="text-lg font-semibold">SSO / Enterprise Auth</h2>
+			</div>
+			<p class="text-sm text-muted-foreground">
+				Connect external identity providers — LDAP/Active Directory or OpenID Connect
+			</p>
+		</div>
+
+		{#if !licenseChecked}
+			<div class="mt-4">
+				<Skeleton class="h-32 w-full rounded-lg" />
+			</div>
+		{:else if !hasValidLicense}
+			<div class="mt-4">
+				<EnterpriseFeatureLock
+					inline
+					featureName="SSO"
+					description="Authenticate users via your corporate LDAP directory or any OIDC-compatible provider."
+					features={[
+						'LDAP / Active Directory',
+						'OpenID Connect (OIDC)',
+						'Auto-provision users',
+						'Group → role mapping'
+					]}
+				/>
+			</div>
+		{:else}
+			<!-- LDAP providers -->
+			<div class="mt-5">
+				<div class="flex items-center justify-between">
+					<div class="flex items-center gap-2">
+						<Server class="size-4 text-muted-foreground" />
+						<span class="text-sm font-medium">LDAP / Active Directory</span>
+						{#if !ssoLoading}
+							<Badge variant="secondary" class="text-[10px]">{ldapProviders.length}</Badge>
+						{/if}
+					</div>
+					<Button size="sm" variant="outline" class="gap-1.5 text-xs" onclick={openAddLdap}>
+						<Plus class="size-3" /> Add LDAP
 					</Button>
-					{#if !role.isSystem}
-						<AlertDialog>
-							<AlertDialogTrigger>
-								{#snippet child({ props })}
+				</div>
+
+				<div class="mt-3 space-y-2">
+					{#if ssoLoading}
+						{#each [0, 1] as i (i)}
+							<div
+								class="flex h-14 animate-pulse items-center gap-3 rounded-lg border bg-card px-4"
+							>
+								<Skeleton class="size-8 rounded-full" />
+								<div class="flex-1 space-y-1.5">
+									<Skeleton class="h-3.5 w-36" />
+									<Skeleton class="h-3 w-52" />
+								</div>
+							</div>
+						{/each}
+					{:else if ldapProviders.length === 0}
+						<div
+							class="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center"
+						>
+							<Server class="size-7 text-muted-foreground/40" />
+							<p class="text-xs text-muted-foreground">No LDAP providers configured</p>
+						</div>
+					{:else}
+						{#each ldapProviders as ldap (ldap.id)}
+							<div class="flex items-center gap-3 rounded-lg border bg-card px-4 py-3">
+								<div
+									class="flex size-9 shrink-0 items-center justify-center rounded-full border bg-blue-500/10"
+								>
+									<Server class="size-4 text-blue-500" />
+								</div>
+								<div class="min-w-0 flex-1">
+									<div class="flex flex-wrap items-center gap-1.5">
+										<span class="text-sm font-medium">{ldap.name}</span>
+										{#if ldap.enabled}
+											<Badge variant="outline" class="text-[10px]">
+												<span class="mr-1 inline-block size-1.5 rounded-full bg-green-500"
+												></span>Enabled
+											</Badge>
+										{:else}
+											<Badge variant="outline" class="text-[10px] text-muted-foreground">
+												<span class="mr-1 inline-block size-1.5 rounded-full bg-muted-foreground"
+												></span>Disabled
+											</Badge>
+										{/if}
+									</div>
+									<p class="mt-0.5 truncate text-xs text-muted-foreground">{ldap.serverUrl}</p>
+								</div>
+								<div class="flex shrink-0 items-center gap-1">
+									<Switch
+										checked={ldap.enabled}
+										onCheckedChange={() => toggleLdap(ldap)}
+										aria-label="Toggle LDAP provider"
+									/>
 									<Button
-										{...props}
 										variant="ghost"
 										size="icon"
-										class="size-7 text-muted-foreground hover:text-destructive"
+										class="size-7 text-muted-foreground hover:text-foreground"
+										onclick={() => openEditLdap(ldap)}
 									>
-										<Trash2 class="size-3.5" />
+										<Pencil class="size-3.5" />
 									</Button>
-								{/snippet}
-							</AlertDialogTrigger>
-							<AlertDialogContent>
-								<AlertDialogHeader>
-									<AlertDialogTitle>Delete role?</AlertDialogTitle>
-									<AlertDialogDescription class="text-xs">
-										The <strong>{role.name}</strong> role will be removed and users assigned to it will
-										lose this role.
-									</AlertDialogDescription>
-								</AlertDialogHeader>
-								<AlertDialogFooter>
-									<AlertDialogCancel class="h-8 text-xs">Cancel</AlertDialogCancel>
-									<AlertDialogAction
-										class="text-destructive-foreground h-8 bg-destructive text-xs hover:bg-destructive/90"
-										onclick={() => handleDeleteRole(role.id)}
-									>
-										Delete
-									</AlertDialogAction>
-								</AlertDialogFooter>
-							</AlertDialogContent>
-						</AlertDialog>
+									<AlertDialog>
+										<AlertDialogTrigger>
+											{#snippet child({ props })}
+												<Button
+													{...props}
+													variant="ghost"
+													size="icon"
+													class="size-7 text-muted-foreground hover:text-destructive"
+												>
+													<Trash2 class="size-3.5" />
+												</Button>
+											{/snippet}
+										</AlertDialogTrigger>
+										<AlertDialogContent>
+											<AlertDialogHeader>
+												<AlertDialogTitle>Delete LDAP provider?</AlertDialogTitle>
+												<AlertDialogDescription class="text-xs">
+													<strong>{ldap.name}</strong> will be removed. Users who logged in via this provider
+													will keep their local accounts.
+												</AlertDialogDescription>
+											</AlertDialogHeader>
+											<AlertDialogFooter>
+												<AlertDialogCancel class="h-8 text-xs">Cancel</AlertDialogCancel>
+												<AlertDialogAction
+													class="text-destructive-foreground h-8 bg-destructive text-xs hover:bg-destructive/90"
+													onclick={() => deleteLdap(ldap.id, ldap.name)}
+												>
+													Delete
+												</AlertDialogAction>
+											</AlertDialogFooter>
+										</AlertDialogContent>
+									</AlertDialog>
+								</div>
+							</div>
+						{/each}
 					{/if}
 				</div>
 			</div>
-		{/each}
-	{/if}
-</div>
-{/if}
 
-<!-- ── SSO / Enterprise Auth ─────────────────────────────────────────────── -->
-<div class="mt-8">
-	<div class="mb-1 flex items-center gap-2">
-		<Badge
-			class="h-5 gap-0.5 rounded-md border-0 bg-linear-to-r from-amber-400 to-yellow-500 px-1.5 text-[10px] font-bold text-black shadow-sm"
-		>
-			<Sparkles class="size-3" />
-			Pro
-		</Badge>
-		<h2 class="text-lg font-semibold">SSO / Enterprise Auth</h2>
-	</div>
-	<p class="text-sm text-muted-foreground">
-		Connect external identity providers — LDAP/Active Directory or OpenID Connect
-	</p>
-</div>
-
-{#if !licenseChecked}
-	<div class="mt-4">
-		<Skeleton class="h-32 w-full rounded-lg" />
-	</div>
-{:else if !hasValidLicense}
-	<div class="mt-4">
-		<EnterpriseFeatureLock
-			inline
-			featureName="SSO"
-			description="Authenticate users via your corporate LDAP directory or any OIDC-compatible provider."
-			features={['LDAP / Active Directory', 'OpenID Connect (OIDC)', 'Auto-provision users', 'Group → role mapping']}
-		/>
-	</div>
-{:else}
-	<!-- LDAP providers -->
-	<div class="mt-5">
-		<div class="flex items-center justify-between">
-			<div class="flex items-center gap-2">
-				<Server class="size-4 text-muted-foreground" />
-				<span class="text-sm font-medium">LDAP / Active Directory</span>
-				{#if !ssoLoading}
-					<Badge variant="secondary" class="text-[10px]">{ldapProviders.length}</Badge>
-				{/if}
-			</div>
-			<Button size="sm" variant="outline" class="gap-1.5 text-xs" onclick={openAddLdap}>
-				<Plus class="size-3" /> Add LDAP
-			</Button>
-		</div>
-
-		<div class="mt-3 space-y-2">
-			{#if ssoLoading}
-				{#each [0, 1] as i (i)}
-					<div class="flex h-14 animate-pulse items-center gap-3 rounded-lg border bg-card px-4">
-						<Skeleton class="size-8 rounded-full" />
-						<div class="flex-1 space-y-1.5">
-							<Skeleton class="h-3.5 w-36" />
-							<Skeleton class="h-3 w-52" />
-						</div>
+			<!-- OIDC providers -->
+			<div class="mt-5">
+				<div class="flex items-center justify-between">
+					<div class="flex items-center gap-2">
+						<Globe class="size-4 text-muted-foreground" />
+						<span class="text-sm font-medium">OpenID Connect (OIDC)</span>
+						{#if !ssoLoading}
+							<Badge variant="secondary" class="text-[10px]">{oidcProviders.length}</Badge>
+						{/if}
 					</div>
-				{/each}
-			{:else if ldapProviders.length === 0}
-				<div
-					class="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center"
-				>
-					<Server class="size-7 text-muted-foreground/40" />
-					<p class="text-xs text-muted-foreground">No LDAP providers configured</p>
+					<Button size="sm" variant="outline" class="gap-1.5 text-xs" onclick={openAddOidc}>
+						<Plus class="size-3" /> Add OIDC
+					</Button>
 				</div>
-			{:else}
-				{#each ldapProviders as ldap (ldap.id)}
-					<div class="flex items-center gap-3 rounded-lg border bg-card px-4 py-3">
-						<div
-							class="flex size-9 shrink-0 items-center justify-center rounded-full border bg-blue-500/10"
-						>
-							<Server class="size-4 text-blue-500" />
-						</div>
-						<div class="min-w-0 flex-1">
-							<div class="flex flex-wrap items-center gap-1.5">
-								<span class="text-sm font-medium">{ldap.name}</span>
-								{#if ldap.enabled}
-									<Badge variant="outline" class="text-[10px]">
-										<span class="mr-1 inline-block size-1.5 rounded-full bg-green-500"></span>Enabled
-									</Badge>
-								{:else}
-									<Badge
-										variant="outline"
-										class="text-[10px] text-muted-foreground"
-									>
-										<span
-											class="mr-1 inline-block size-1.5 rounded-full bg-muted-foreground"
-										></span>Disabled
-									</Badge>
-								{/if}
-							</div>
-							<p class="mt-0.5 truncate text-xs text-muted-foreground">{ldap.serverUrl}</p>
-						</div>
-						<div class="flex shrink-0 items-center gap-1">
-							<Switch
-								checked={ldap.enabled}
-								onCheckedChange={() => toggleLdap(ldap)}
-								aria-label="Toggle LDAP provider"
-							/>
-							<Button
-								variant="ghost"
-								size="icon"
-								class="size-7 text-muted-foreground hover:text-foreground"
-								onclick={() => openEditLdap(ldap)}
+
+				<div class="mt-3 space-y-2">
+					{#if ssoLoading}
+						{#each [0, 1] as i (i)}
+							<div
+								class="flex h-14 animate-pulse items-center gap-3 rounded-lg border bg-card px-4"
 							>
-								<Pencil class="size-3.5" />
-							</Button>
-							<AlertDialog>
-								<AlertDialogTrigger>
-									{#snippet child({ props })}
-										<Button
-											{...props}
-											variant="ghost"
-											size="icon"
-											class="size-7 text-muted-foreground hover:text-destructive"
-										>
-											<Trash2 class="size-3.5" />
-										</Button>
-									{/snippet}
-								</AlertDialogTrigger>
-								<AlertDialogContent>
-									<AlertDialogHeader>
-										<AlertDialogTitle>Delete LDAP provider?</AlertDialogTitle>
-										<AlertDialogDescription class="text-xs">
-											<strong>{ldap.name}</strong> will be removed. Users who logged in via this
-											provider will keep their local accounts.
-										</AlertDialogDescription>
-									</AlertDialogHeader>
-									<AlertDialogFooter>
-										<AlertDialogCancel class="h-8 text-xs">Cancel</AlertDialogCancel>
-										<AlertDialogAction
-											class="text-destructive-foreground h-8 bg-destructive text-xs hover:bg-destructive/90"
-											onclick={() => deleteLdap(ldap.id, ldap.name)}
-										>
-											Delete
-										</AlertDialogAction>
-									</AlertDialogFooter>
-								</AlertDialogContent>
-							</AlertDialog>
+								<Skeleton class="size-8 rounded-full" />
+								<div class="flex-1 space-y-1.5">
+									<Skeleton class="h-3.5 w-36" />
+									<Skeleton class="h-3 w-52" />
+								</div>
+							</div>
+						{/each}
+					{:else if oidcProviders.length === 0}
+						<div
+							class="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center"
+						>
+							<Globe class="size-7 text-muted-foreground/40" />
+							<p class="text-xs text-muted-foreground">No OIDC providers configured</p>
 						</div>
-					</div>
-				{/each}
-			{/if}
-		</div>
-	</div>
-
-	<!-- OIDC providers -->
-	<div class="mt-5">
-		<div class="flex items-center justify-between">
-			<div class="flex items-center gap-2">
-				<Globe class="size-4 text-muted-foreground" />
-				<span class="text-sm font-medium">OpenID Connect (OIDC)</span>
-				{#if !ssoLoading}
-					<Badge variant="secondary" class="text-[10px]">{oidcProviders.length}</Badge>
-				{/if}
-			</div>
-			<Button size="sm" variant="outline" class="gap-1.5 text-xs" onclick={openAddOidc}>
-				<Plus class="size-3" /> Add OIDC
-			</Button>
-		</div>
-
-		<div class="mt-3 space-y-2">
-			{#if ssoLoading}
-				{#each [0, 1] as i (i)}
-					<div class="flex h-14 animate-pulse items-center gap-3 rounded-lg border bg-card px-4">
-						<Skeleton class="size-8 rounded-full" />
-						<div class="flex-1 space-y-1.5">
-							<Skeleton class="h-3.5 w-36" />
-							<Skeleton class="h-3 w-52" />
-						</div>
-					</div>
-				{/each}
-			{:else if oidcProviders.length === 0}
-				<div
-					class="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center"
-				>
-					<Globe class="size-7 text-muted-foreground/40" />
-					<p class="text-xs text-muted-foreground">No OIDC providers configured</p>
+					{:else}
+						{#each oidcProviders as oidc (oidc.id)}
+							<div class="flex items-center gap-3 rounded-lg border bg-card px-4 py-3">
+								<div
+									class="flex size-9 shrink-0 items-center justify-center rounded-full border bg-purple-500/10"
+								>
+									<Globe class="size-4 text-purple-500" />
+								</div>
+								<div class="min-w-0 flex-1">
+									<div class="flex flex-wrap items-center gap-1.5">
+										<span class="text-sm font-medium">{oidc.name}</span>
+										{#if oidc.enabled}
+											<Badge variant="outline" class="text-[10px]">
+												<span class="mr-1 inline-block size-1.5 rounded-full bg-green-500"
+												></span>Enabled
+											</Badge>
+										{:else}
+											<Badge variant="outline" class="text-[10px] text-muted-foreground">
+												<span class="mr-1 inline-block size-1.5 rounded-full bg-muted-foreground"
+												></span>Disabled
+											</Badge>
+										{/if}
+									</div>
+									<p class="mt-0.5 truncate text-xs text-muted-foreground">{oidc.issuerUrl}</p>
+								</div>
+								<div class="flex shrink-0 items-center gap-1">
+									<Switch
+										checked={oidc.enabled}
+										onCheckedChange={() => toggleOidc(oidc)}
+										aria-label="Toggle OIDC provider"
+									/>
+									<Button
+										variant="ghost"
+										size="icon"
+										class="size-7 text-muted-foreground hover:text-foreground"
+										onclick={() => openEditOidc(oidc)}
+									>
+										<Pencil class="size-3.5" />
+									</Button>
+									<AlertDialog>
+										<AlertDialogTrigger>
+											{#snippet child({ props })}
+												<Button
+													{...props}
+													variant="ghost"
+													size="icon"
+													class="size-7 text-muted-foreground hover:text-destructive"
+												>
+													<Trash2 class="size-3.5" />
+												</Button>
+											{/snippet}
+										</AlertDialogTrigger>
+										<AlertDialogContent>
+											<AlertDialogHeader>
+												<AlertDialogTitle>Delete OIDC provider?</AlertDialogTitle>
+												<AlertDialogDescription class="text-xs">
+													<strong>{oidc.name}</strong> will be removed. Users who logged in via this provider
+													will keep their local accounts.
+												</AlertDialogDescription>
+											</AlertDialogHeader>
+											<AlertDialogFooter>
+												<AlertDialogCancel class="h-8 text-xs">Cancel</AlertDialogCancel>
+												<AlertDialogAction
+													class="text-destructive-foreground h-8 bg-destructive text-xs hover:bg-destructive/90"
+													onclick={() => deleteOidc(oidc.id, oidc.name)}
+												>
+													Delete
+												</AlertDialogAction>
+											</AlertDialogFooter>
+										</AlertDialogContent>
+									</AlertDialog>
+								</div>
+							</div>
+						{/each}
+					{/if}
 				</div>
-			{:else}
-				{#each oidcProviders as oidc (oidc.id)}
-					<div class="flex items-center gap-3 rounded-lg border bg-card px-4 py-3">
-						<div
-							class="flex size-9 shrink-0 items-center justify-center rounded-full border bg-purple-500/10"
-						>
-							<Globe class="size-4 text-purple-500" />
-						</div>
-						<div class="min-w-0 flex-1">
-							<div class="flex flex-wrap items-center gap-1.5">
-								<span class="text-sm font-medium">{oidc.name}</span>
-								{#if oidc.enabled}
-									<Badge variant="outline" class="text-[10px]">
-										<span class="mr-1 inline-block size-1.5 rounded-full bg-green-500"></span>Enabled
-									</Badge>
-								{:else}
-									<Badge
-										variant="outline"
-										class="text-[10px] text-muted-foreground"
-									>
-										<span
-											class="mr-1 inline-block size-1.5 rounded-full bg-muted-foreground"
-										></span>Disabled
-									</Badge>
-								{/if}
-							</div>
-							<p class="mt-0.5 truncate text-xs text-muted-foreground">{oidc.issuerUrl}</p>
-						</div>
-						<div class="flex shrink-0 items-center gap-1">
-							<Switch
-								checked={oidc.enabled}
-								onCheckedChange={() => toggleOidc(oidc)}
-								aria-label="Toggle OIDC provider"
-							/>
-							<Button
-								variant="ghost"
-								size="icon"
-								class="size-7 text-muted-foreground hover:text-foreground"
-								onclick={() => openEditOidc(oidc)}
-							>
-								<Pencil class="size-3.5" />
-							</Button>
-							<AlertDialog>
-								<AlertDialogTrigger>
-									{#snippet child({ props })}
-										<Button
-											{...props}
-											variant="ghost"
-											size="icon"
-											class="size-7 text-muted-foreground hover:text-destructive"
-										>
-											<Trash2 class="size-3.5" />
-										</Button>
-									{/snippet}
-								</AlertDialogTrigger>
-								<AlertDialogContent>
-									<AlertDialogHeader>
-										<AlertDialogTitle>Delete OIDC provider?</AlertDialogTitle>
-										<AlertDialogDescription class="text-xs">
-											<strong>{oidc.name}</strong> will be removed. Users who logged in via this
-											provider will keep their local accounts.
-										</AlertDialogDescription>
-									</AlertDialogHeader>
-									<AlertDialogFooter>
-										<AlertDialogCancel class="h-8 text-xs">Cancel</AlertDialogCancel>
-										<AlertDialogAction
-											class="text-destructive-foreground h-8 bg-destructive text-xs hover:bg-destructive/90"
-											onclick={() => deleteOidc(oidc.id, oidc.name)}
-										>
-											Delete
-										</AlertDialogAction>
-									</AlertDialogFooter>
-								</AlertDialogContent>
-							</AlertDialog>
-						</div>
-					</div>
-				{/each}
-			{/if}
-		</div>
-	</div>
-{/if}
+			</div>
+		{/if}
+	</Tabs.Content>
+
+
+</Tabs.Root>
+
+<!-- MFA Self-Service Dialogs -->
+<MfaSetupDialog
+	bind:open={mfaSetupOpen}
+	onClose={() => (mfaSetupOpen = false)}
+	onEnabled={handleMfaSelfEnabled}
+/>
+
+<MfaDisableDialog
+	bind:open={mfaDisableSelfOpen}
+	onClose={() => (mfaDisableSelfOpen = false)}
+	onDisabled={handleMfaSelfDisabled}
+/>
 
 <!-- ── LDAP Dialog ──────────────────────────────────────────────────────────── -->
 <Dialog.Root bind:open={ldapDialogOpen}>
@@ -1077,11 +1325,7 @@
 			</div>
 			<div class="space-y-1.5">
 				<Label class="text-xs">Base DN *</Label>
-				<Input
-					bind:value={ldapForm.baseDn}
-					placeholder="dc=example,dc=com"
-					class="h-8 text-xs"
-				/>
+				<Input bind:value={ldapForm.baseDn} placeholder="dc=example,dc=com" class="h-8 text-xs" />
 			</div>
 			<div class="grid grid-cols-2 gap-3">
 				<div class="space-y-1.5">
@@ -1094,33 +1338,24 @@
 				</div>
 				<div class="space-y-1.5">
 					<Label class="text-xs">Username Attribute</Label>
-					<Input
-						bind:value={ldapForm.usernameAttribute}
-						placeholder="uid"
-						class="h-8 text-xs"
-					/>
+					<Input bind:value={ldapForm.usernameAttribute} placeholder="uid" class="h-8 text-xs" />
 				</div>
 			</div>
 			<div class="grid grid-cols-2 gap-3">
 				<div class="space-y-1.5">
 					<Label class="text-xs">Email Attribute</Label>
-					<Input
-						bind:value={ldapForm.emailAttribute}
-						placeholder="mail"
-						class="h-8 text-xs"
-					/>
+					<Input bind:value={ldapForm.emailAttribute} placeholder="mail" class="h-8 text-xs" />
 				</div>
 				<div class="space-y-1.5">
 					<Label class="text-xs">Display Name Attribute</Label>
-					<Input
-						bind:value={ldapForm.displayNameAttribute}
-						placeholder="cn"
-						class="h-8 text-xs"
-					/>
+					<Input bind:value={ldapForm.displayNameAttribute} placeholder="cn" class="h-8 text-xs" />
 				</div>
 			</div>
 			<div class="space-y-1.5">
-				<Label class="text-xs">Admin Group DN <span class="text-muted-foreground">(optional — grants admin)</span></Label>
+				<Label class="text-xs"
+					>Admin Group DN <span class="text-muted-foreground">(optional — grants admin)</span
+					></Label
+				>
 				<Input
 					bind:value={ldapForm.adminGroup}
 					placeholder="cn=admins,dc=example,dc=com"
@@ -1138,7 +1373,7 @@
 						bind:value={ldapForm.tlsCa}
 						placeholder="-----BEGIN CERTIFICATE-----"
 						rows={4}
-						class="w-full resize-none rounded-md border bg-background px-3 py-2 font-mono text-[11px] focus:outline-none focus:ring-1 focus:ring-ring"
+						class="w-full resize-none rounded-md border bg-background px-3 py-2 font-mono text-[11px] focus:ring-1 focus:ring-ring focus:outline-none"
 					></textarea>
 				</div>
 			{/if}
@@ -1192,15 +1427,17 @@
 		<Dialog.Header>
 			<Dialog.Title>{isEditOidc ? 'Edit' : 'Add'} OIDC Provider</Dialog.Title>
 			<Dialog.Description class="text-xs">
-				Connect AutoKube to any OpenID Connect-compatible identity provider (Auth0, Keycloak,
-				Azure AD, Okta, Google…).
+				Connect AutoKube to any OpenID Connect-compatible identity provider (Auth0, Keycloak, Azure
+				AD, Okta, Google…).
 			</Dialog.Description>
 		</Dialog.Header>
 
 		<div class="space-y-4 py-2">
 			<!-- Callback URL hint -->
 			<div class="rounded-md border bg-muted/40 px-3 py-2">
-				<p class="text-[10px] text-muted-foreground">Callback / Redirect URI to register with your provider:</p>
+				<p class="text-[10px] text-muted-foreground">
+					Callback / Redirect URI to register with your provider:
+				</p>
 				<p class="mt-0.5 font-mono text-[11px] text-foreground">{oidcCallbackUrl()}</p>
 			</div>
 
@@ -1252,29 +1489,19 @@
 				</div>
 				<div class="space-y-1.5">
 					<Label class="text-xs">Email Claim</Label>
-					<Input
-						bind:value={oidcForm.emailClaim}
-						placeholder="email"
-						class="h-8 text-xs"
-					/>
+					<Input bind:value={oidcForm.emailClaim} placeholder="email" class="h-8 text-xs" />
 				</div>
 				<div class="space-y-1.5">
 					<Label class="text-xs">Name Claim</Label>
-					<Input
-						bind:value={oidcForm.displayNameClaim}
-						placeholder="name"
-						class="h-8 text-xs"
-					/>
+					<Input bind:value={oidcForm.displayNameClaim} placeholder="name" class="h-8 text-xs" />
 				</div>
 			</div>
 			<div class="grid grid-cols-2 gap-3">
 				<div class="space-y-1.5">
-					<Label class="text-xs">Admin Claim <span class="text-muted-foreground">(optional)</span></Label>
-					<Input
-						bind:value={oidcForm.adminClaim}
-						placeholder="roles"
-						class="h-8 text-xs"
-					/>
+					<Label class="text-xs"
+						>Admin Claim <span class="text-muted-foreground">(optional)</span></Label
+					>
+					<Input bind:value={oidcForm.adminClaim} placeholder="roles" class="h-8 text-xs" />
 				</div>
 				<div class="space-y-1.5">
 					<Label class="text-xs">Admin Value</Label>
@@ -1286,12 +1513,10 @@
 				</div>
 			</div>
 			<div class="space-y-1.5">
-				<Label class="text-xs">Group/Role Claim <span class="text-muted-foreground">(for role mapping)</span></Label>
-				<Input
-					bind:value={oidcForm.roleMappingsClaim}
-					placeholder="groups"
-					class="h-8 text-xs"
-				/>
+				<Label class="text-xs"
+					>Group/Role Claim <span class="text-muted-foreground">(for role mapping)</span></Label
+				>
+				<Input bind:value={oidcForm.roleMappingsClaim} placeholder="groups" class="h-8 text-xs" />
 			</div>
 			<div class="flex items-center gap-2">
 				<Switch bind:checked={oidcForm.enabled} />
@@ -1324,4 +1549,11 @@
 	role={editingRole}
 	onClose={closeRoleDialog}
 	onSave={handleSaveRole}
+/>
+<MfaDisableDialog
+	bind:open={mfaDisableDialogOpen}
+	targetUserId={mfaDisableTargetUserId}
+	targetUsername={mfaDisableTargetUsername}
+	onClose={closeMfaDisableDialog}
+	onDisabled={handleMfaDisabled}
 />

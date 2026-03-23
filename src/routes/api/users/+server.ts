@@ -29,6 +29,7 @@ export const GET: RequestHandler = async ({ cookies }) => {
 				displayName: users.displayName,
 				isActive: users.isActive,
 				authProvider: users.authProvider,
+				mfaEnabled: users.mfaEnabled,
 				lastLogin: users.lastLogin,
 				createdAt: users.createdAt,
 				updatedAt: users.updatedAt,
