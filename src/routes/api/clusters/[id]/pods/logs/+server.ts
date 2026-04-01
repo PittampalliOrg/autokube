@@ -180,8 +180,8 @@ export const GET: RequestHandler = async ({ params, url, cookies, request }) => 
 			}
 
 			const standardConfig = config as KubeconfigData | BearerTokenConnection;
-			qs.set('follow', 'true');
 			const baseUrl = new URL(logPath, standardConfig.server);
+			baseUrl.searchParams.set('follow', 'true');
 			const skipTLSVerify =
 				standardConfig.skipTLSVerify || process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0';
 
