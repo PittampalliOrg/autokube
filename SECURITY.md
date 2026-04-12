@@ -17,7 +17,7 @@ We take security vulnerabilities seriously. If you discover a security issue in 
 
 **DO NOT** open a public GitHub issue for security vulnerabilities.
 
-Instead, please report security issues to: **security@autokube.dev** (or your designated security contact email)
+Instead, please report security issues to: **security@autokube.io** (or your designated security contact email)
 
 Include the following information:
 - Description of the vulnerability
@@ -209,7 +209,7 @@ We believe in responsible disclosure and commit to:
 
 For security-related questions or concerns:
 
-- **Security Issues**: security@autokube.dev
+- **Security Issues**: security@autokube.io
 - **General Questions**: Use GitHub Discussions
 - **Commercial Support**: Contact your support representative
 
