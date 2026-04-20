@@ -25,7 +25,7 @@
 	} from 'lucide-svelte';
 	import { clusterStore } from '$lib/stores/cluster.svelte';
 	import { useResourceWatch } from '$lib/hooks/use-resource-watch.svelte';
-	import { onDestroy } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import {
 		type StatefulSet,
 		type StatefulSetWithAge,
@@ -40,6 +40,7 @@
 	import ResourceDrawer, { type ResourceRef } from '$lib/components/resource-drawer.svelte';
 
 	const activeCluster = $derived(clusterStore.active);
+	const activeClusterId = $derived(activeCluster?.id ?? null);
 	let allStatefulSets = $state<StatefulSet[]>([]);
 	let loading = $state(false);
 	let error = $state<string | null>(null);
@@ -113,67 +114,65 @@
 		return result;
 	});
 
-	// Plain let — NOT $state. Writing inside a $effect would re-trigger it.
-	let statefulSetsWatch: ReturnType<typeof useResourceWatch<StatefulSet>> | null = null;
-
 	// Watch for cluster/namespace changes
 	$effect(() => {
-		if (activeCluster) {
-			fetchNamespaces();
-			fetchStatefulSets();
+		const clusterId = activeClusterId;
+		const namespace = selectedNamespace;
 
-			const ns = selectedNamespace === 'all' ? undefined : selectedNamespace;
+		if (clusterId) {
+			return untrack(() => {
+				fetchNamespaces(clusterId);
+				fetchStatefulSets(clusterId, namespace);
 
-			if (statefulSetsWatch) statefulSetsWatch.unsubscribe();
+				const ns = namespace === 'all' ? undefined : namespace;
 
-			statefulSetsWatch = useResourceWatch<StatefulSet>({
-				clusterId: activeCluster.id,
-				resourceType: 'statefulsets',
-				namespace: ns,
-				onAdded: (sts) => {
-					allStatefulSets = arrayAdd(
-						allStatefulSets,
-						sts,
-						(s) => `${s.namespace}/${s.name}`
-					);
-				},
-				onModified: (sts) => {
-					allStatefulSets = arrayModify(
-						allStatefulSets,
-						sts,
-						(s) => `${s.namespace}/${s.name}`
-					);
-				},
-				onDeleted: (sts) => {
-					allStatefulSets = arrayDelete(
-						allStatefulSets,
-						sts,
-						(s) => `${s.namespace}/${s.name}`
-					);
-				}
+				const statefulSetsWatch = useResourceWatch<StatefulSet>({
+					clusterId,
+					resourceType: 'statefulsets',
+					namespace: ns,
+					onAdded: (sts) => {
+						allStatefulSets = arrayAdd(
+							allStatefulSets,
+							sts,
+							(s) => `${s.namespace}/${s.name}`
+						);
+					},
+					onModified: (sts) => {
+						allStatefulSets = arrayModify(
+							allStatefulSets,
+							sts,
+							(s) => `${s.namespace}/${s.name}`
+						);
+					},
+					onDeleted: (sts) => {
+						allStatefulSets = arrayDelete(
+							allStatefulSets,
+							sts,
+							(s) => `${s.namespace}/${s.name}`
+						);
+					}
+				});
+
+				statefulSetsWatch.subscribe();
+
+				return () => statefulSetsWatch.unsubscribe();
 			});
-
-			statefulSetsWatch.subscribe();
 		} else {
 			allStatefulSets = [];
 			namespaces = [];
-			if (statefulSetsWatch) {
-				statefulSetsWatch.unsubscribe();
-				statefulSetsWatch = null;
-			}
 		}
 	});
 
 	onDestroy(() => {
-		statefulSetsWatch?.unsubscribe();
 		timeTicker.stop();
 	});
 
-	async function fetchNamespaces() {
-		if (!activeCluster?.id) return;
+	async function fetchNamespaces(clusterId = activeClusterId) {
+		if (!clusterId) return;
 		try {
-			const res = await fetch(`/api/namespaces?cluster=${activeCluster.id}`);
+			const res = await fetch(`/api/namespaces?cluster=${clusterId}`);
 			const data = await res.json();
+			if (activeClusterId !== clusterId) return;
 			if (data.success && data.namespaces) {
 				namespaces = data.namespaces.map((ns: { name: string }) => ns.name).sort();
 			}
@@ -182,16 +181,17 @@
 		}
 	}
 
-	async function fetchStatefulSets() {
-		if (!activeCluster?.id) return;
+	async function fetchStatefulSets(clusterId = activeClusterId, namespace = selectedNamespace) {
+		if (!clusterId) return;
 
 		loading = true;
 		error = null;
 
 		try {
-			const ns = selectedNamespace === 'all' ? 'all' : selectedNamespace;
-			const res = await fetch(`/api/clusters/${activeCluster.id}/statefulsets?namespace=${ns}`);
+			const ns = namespace === 'all' ? 'all' : namespace;
+			const res = await fetch(`/api/clusters/${clusterId}/statefulsets?namespace=${ns}`);
 			const data = await res.json();
+			if (activeClusterId !== clusterId || selectedNamespace !== namespace) return;
 
 			if (data.success && data.statefulSets) {
 				allStatefulSets = data.statefulSets;
@@ -327,7 +327,7 @@
 				size="sm"
 				class="h-7 gap-1.5 text-xs"
 				disabled={loading || !activeCluster}
-				onclick={fetchStatefulSets}
+				onclick={() => fetchStatefulSets()}
 			>
 				<RefreshCw class={cn('size-3', loading && 'animate-spin')} />
 				Refresh
@@ -337,7 +337,9 @@
 			<NamespaceSelect
 				{namespaces}
 				value={selectedNamespace}
-				onChange={(ns) => { selectedNamespace = ns; fetchStatefulSets(); }}
+				onChange={(ns) => {
+					selectedNamespace = ns;
+				}}
 			/>
 			<div class="relative flex-1 sm:flex-none">
 				<Search
@@ -411,7 +413,6 @@
 							onclick={(e) => {
 								e.stopPropagation();
 								selectedNamespace = statefulset.namespace;
-								fetchStatefulSets();
 							}}
 						/>
 					{:else if column.id === 'ready'}

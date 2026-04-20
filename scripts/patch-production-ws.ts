@@ -30,7 +30,7 @@ function patch(description: string, pattern: RegExp, replacement: string): void 
 // regardless of which single-letter var name is used for `init`
 patch(
 	'add ws to let declaration in v()',
-	/(\blet t, n, e, a, )(\w)(;)/,
+	/(async function \w+\(\) \{\n\tlet )(?![^;]*\bws\b)([^;]+)(;\n\treturn \{handle: \w+, handleFetch: \w+, handleError: \w+, handleValidationError: \w+, init: \w+\} = await import\("\.\/chunks\/hooks\.server[^"]+"\), \{)/,
 	'$1$2, ws$3'
 );
 
@@ -39,8 +39,8 @@ patch(
 // insert , websocket: ws before the } rather than after it.
 patch(
 	'add websocket:ws to destructuring in v()',
-	/(\{handle: t, handleFetch: n, handleError: e, handleValidationError: a, init: \w)(\}) = (await import\()/,
-	'$1, websocket: ws$2 = $3'
+	/(\{handle: \w+, handleFetch: \w+, handleError: \w+, handleValidationError: \w+, init: \w+)(\} = await import\("\.\/chunks\/hooks\.server[^"]+"\))/,
+	'$1, websocket: ws$2'
 );
 
 // ── 3. Add websocket to the returned object of v() ───────────────────────────
