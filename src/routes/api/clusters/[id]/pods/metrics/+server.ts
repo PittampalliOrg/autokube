@@ -1,7 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { listPodMetrics } from '$lib/server/services/kubernetes';
-import { findCluster } from '$lib/server/queries/clusters';
+import { getCachedPodMetrics } from '$lib/server/services/resource-cache';
 import { authorize } from '$lib/server/services/authorize';
 
 export const GET: RequestHandler = async ({ params, url, cookies }) => {
@@ -11,21 +10,22 @@ export const GET: RequestHandler = async ({ params, url, cookies }) => {
 	}
 	try {
 		const clusterId = parseInt(params.id);
-		const namespace = url.searchParams.get('namespace') || undefined;
+		const namespace = url.searchParams.get('namespace') || 'all';
 
-		// Return empty metrics when metrics-server integration is disabled
-		const cluster = await findCluster(clusterId);
-		if (cluster?.metricsEnabled === false) {
-			return json({ success: true, metrics: [] });
+		if (isNaN(clusterId)) {
+			return json({ success: false, error: 'Invalid cluster ID' }, { status: 400 });
 		}
 
-		const result = await listPodMetrics(clusterId, namespace);
+		const result = await getCachedPodMetrics(clusterId, namespace);
 
-		if (!result.success) {
-			return json({ success: false, error: result.error }, { status: 500 });
+		if (result.cache.status === 'warming' && result.cache.lastError) {
+			return json(
+				{ success: false, error: result.cache.lastError, cache: result.cache },
+				{ status: 500 }
+			);
 		}
 
-		return json({ success: true, metrics: result.metrics });
+		return json({ success: true, metrics: result.data, cache: result.cache });
 	} catch (error) {
 		console.error('[Pods Metrics API] Error:', error);
 		return json(

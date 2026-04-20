@@ -7,3 +7,4 @@ export * from './authorize';
 export * from './audit';
 export * from './license';
 export * from './notification-monitor';
+export * from './resource-cache';

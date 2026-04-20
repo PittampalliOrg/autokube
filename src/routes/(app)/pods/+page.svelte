@@ -27,7 +27,7 @@
 	import { clusterStore } from '$lib/stores/cluster.svelte';
 	import { useResourceWatch } from '$lib/hooks/use-resource-watch.svelte';
 	import { useMetricsWatch, type PodMetric } from '$lib/hooks/use-metrics-watch.svelte';
-	import { onDestroy } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import { type Pod, type PodWithAge, getStatusIcon, getStatusColor } from './columns';
 	import { DataTableView, type DataTableSortState } from '$lib/components/data-table-view';
 	import { TableName, podsColumns } from '$lib/table-columns';
@@ -41,8 +41,12 @@
 	import type { ResourceRef } from '$lib/components/resource-drawer.svelte';
 
 	const activeCluster = $derived(clusterStore.active);
+	const activeClusterId = $derived(activeCluster?.id ?? null);
 	const metricsEnabled = $derived(
-		clustersStore.clusters.find((c) => c.id === activeCluster?.id)?.metricsEnabled !== false
+		clustersStore.clusters.find((c) => c.id === activeClusterId)?.metricsEnabled !== false
+	);
+	const metricsWatchEnabled = $derived(
+		metricsEnabled && activeCluster?.metricsAvailable === true
 	);
 	const visibleColumns = $derived(
 		metricsEnabled ? podsColumns : podsColumns.filter((c) => c.id !== 'cpu' && c.id !== 'memory')
@@ -164,52 +168,78 @@
 	// Plain let — NOT $state. Writing inside a $effect would re-trigger it.
 	let podsWatch: ReturnType<typeof useResourceWatch<Pod>> | null = null;
 	let metricsWatch: ReturnType<typeof useMetricsWatch> | null = null;
+	let podsPoll: ReturnType<typeof setInterval> | null = null;
+
+	function cancelPodsPoll() {
+		if (podsPoll) {
+			clearInterval(podsPoll);
+			podsPoll = null;
+		}
+	}
 
 	// Watch for cluster/namespace changes
 	$effect(() => {
-		if (activeCluster) {
-			fetchNamespaces();
-			fetchPods();
+		const clusterId = activeClusterId;
+		const namespace = selectedNamespace;
+		const shouldFetchMetrics = metricsEnabled;
+		const shouldWatchMetrics = metricsWatchEnabled;
 
-			const ns = selectedNamespace === 'all' ? undefined : selectedNamespace;
+		if (clusterId) {
+			const ns = namespace === 'all' ? undefined : namespace;
 
-			if (podsWatch) podsWatch.unsubscribe();
-			if (metricsWatch) metricsWatch.unsubscribe();
-			cancelPendingAdds();
+			untrack(() => {
+				cancelPodsPoll();
+				fetchNamespaces(clusterId);
+				fetchPods(clusterId, namespace, shouldFetchMetrics);
+				podsPoll = setInterval(() => {
+					if (document.hidden) return;
+					fetchPods(clusterId, namespace, shouldFetchMetrics, false);
+				}, 10_000);
 
-			podsWatch = useResourceWatch<Pod>({
-				clusterId: activeCluster.id,
-				resourceType: 'pods',
-				namespace: ns,
-				onAdded: queueAdd,
-				onModified: (pod) => {
-					allPods = arrayModify(allPods, pod, (p) => `${p.namespace}/${p.name}`);
-				},
-				onDeleted: (pod) => {
-					allPods = arrayDelete(allPods, pod, (p) => `${p.namespace}/${p.name}`);
+				if (podsWatch) podsWatch.unsubscribe();
+				if (metricsWatch) metricsWatch.unsubscribe();
+				metricsWatch = null;
+				cancelPendingAdds();
+
+				podsWatch = useResourceWatch<Pod>({
+					clusterId,
+					resourceType: 'pods',
+					namespace: ns,
+					onAdded: queueAdd,
+					onModified: (pod) => {
+						allPods = arrayModify(allPods, pod, (p) => `${p.namespace}/${p.name}`);
+					},
+					onDeleted: (pod) => {
+						allPods = arrayDelete(allPods, pod, (p) => `${p.namespace}/${p.name}`);
+					}
+				});
+
+				if (shouldWatchMetrics) {
+					metricsWatch = useMetricsWatch({
+						clusterId,
+						namespace: ns,
+						onUpdate: (metric: PodMetric) => {
+							const key = `${metric.namespace}/${metric.name}`;
+							const m = new Map(metricsMap);
+							m.set(key, { cpu: metric.cpu, memory: metric.memory });
+							metricsMap = m;
+						},
+						onDelete: (metric: PodMetric) => {
+							const key = `${metric.namespace}/${metric.name}`;
+							const m = new Map(metricsMap);
+							m.delete(key);
+							metricsMap = m;
+						}
+					});
+				} else {
+					metricsMap = new Map();
 				}
-			});
 
-			metricsWatch = useMetricsWatch({
-				clusterId: activeCluster.id,
-				namespace: ns,
-				onUpdate: (metric: PodMetric) => {
-					const key = `${metric.namespace}/${metric.name}`;
-					const m = new Map(metricsMap);
-					m.set(key, { cpu: metric.cpu, memory: metric.memory });
-					metricsMap = m;
-				},
-				onDelete: (metric: PodMetric) => {
-					const key = `${metric.namespace}/${metric.name}`;
-					const m = new Map(metricsMap);
-					m.delete(key);
-					metricsMap = m;
-				}
+				podsWatch.subscribe();
+				metricsWatch?.subscribe();
 			});
-
-			podsWatch.subscribe();
-			metricsWatch.subscribe();
 		} else {
+			cancelPodsPoll();
 			cancelPendingAdds();
 			allPods = [];
 			namespaces = [];
@@ -226,17 +256,19 @@
 	});
 
 	onDestroy(() => {
+		cancelPodsPoll();
 		cancelPendingAdds();
 		podsWatch?.unsubscribe();
 		metricsWatch?.unsubscribe();
 		timeTicker.stop();
 	});
 
-	async function fetchNamespaces() {
-		if (!activeCluster?.id) return;
+	async function fetchNamespaces(clusterId = activeClusterId) {
+		if (!clusterId) return;
 		try {
-			const res = await fetch(`/api/namespaces?cluster=${activeCluster.id}`);
+			const res = await fetch(`/api/namespaces?cluster=${clusterId}`);
 			const data = await res.json();
+			if (activeClusterId !== clusterId) return;
 			if (data.success && data.namespaces) {
 				namespaces = data.namespaces.map((ns: { name: string }) => ns.name).sort();
 			}
@@ -245,21 +277,31 @@
 		}
 	}
 
-	async function fetchPods() {
-		if (!activeCluster?.id) return;
+	async function fetchPods(
+		clusterId = activeClusterId,
+		namespace = selectedNamespace,
+		shouldFetchMetrics = metricsEnabled,
+		showLoading = true
+	) {
+		if (!clusterId) return;
 
-		loading = true;
-		error = null;
+		if (showLoading) {
+			loading = true;
+			error = null;
+		}
 
 		try {
-			const ns = selectedNamespace === 'all' ? 'all' : selectedNamespace;
-			const [podsRes, metricsRes] = await Promise.all([
-				fetch(`/api/clusters/${activeCluster.id}/pods?namespace=${ns}`),
-				fetch(`/api/clusters/${activeCluster.id}/pods/metrics?namespace=${ns}`)
-			]);
+			const ns = namespace === 'all' ? 'all' : namespace;
+			const podsRequest = fetch(`/api/clusters/${clusterId}/pods?namespace=${ns}`);
+			const metricsRequest = shouldFetchMetrics
+				? fetch(`/api/clusters/${clusterId}/pods/metrics?namespace=${ns}`)
+				: Promise.resolve(null);
+
+			const [podsRes, metricsRes] = await Promise.all([podsRequest, metricsRequest]);
 
 			const podsData = await podsRes.json();
-			const metricsData = await metricsRes.json();
+			const metricsData = metricsRes ? await metricsRes.json() : { success: true, metrics: [] };
+			if (activeClusterId !== clusterId || selectedNamespace !== namespace) return;
 
 			if (podsData.success && podsData.pods) {
 				allPods = podsData.pods;
@@ -274,14 +316,20 @@
 					metricsMap = m;
 				}
 			} else {
-				error = podsData.error || 'Failed to fetch pods';
-				allPods = [];
+				if (showLoading || allPods.length === 0) {
+					error = podsData.error || 'Failed to fetch pods';
+					allPods = [];
+				}
 			}
 		} catch (err) {
-			error = err instanceof Error ? err.message : 'Failed to fetch pods';
-			allPods = [];
+			if (showLoading || allPods.length === 0) {
+				error = err instanceof Error ? err.message : 'Failed to fetch pods';
+				allPods = [];
+			} else {
+				console.warn('[Pods] Background refresh failed:', err);
+			}
 		} finally {
-			loading = false;
+			if (showLoading) loading = false;
 		}
 	}
 
@@ -360,7 +408,7 @@
 				size="sm"
 				class="h-7 gap-1.5 text-xs"
 				disabled={loading || !activeCluster}
-				onclick={fetchPods}
+				onclick={() => fetchPods()}
 			>
 				<RefreshCw class={cn('size-3', loading && 'animate-spin')} />
 				Refresh

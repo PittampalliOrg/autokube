@@ -44,7 +44,7 @@ import {
 import type { WatchEvent } from '$lib/server/services/kubernetes/watch';
 import { authorize } from '$lib/server/services/authorize';
 
-export const GET: RequestHandler = async ({ params, url, request, cookies}) => {
+export const GET: RequestHandler = async ({ params, url, cookies}) => {
 	const auth = await authorize(cookies);
 	if (auth.authEnabled && !await auth.can('clusters', 'read')) {
 		return json({ error: 'Permission denied' }, { status: 403 });
@@ -66,11 +66,6 @@ export const GET: RequestHandler = async ({ params, url, request, cookies}) => {
 
 	const abortController = new AbortController();
 
-	// Abort K8s watch when client disconnects
-	request.signal.addEventListener('abort', () => {
-		abortController.abort();
-	});
-
 	const encoder = new TextEncoder();
 
 	const stream = new ReadableStream({
@@ -82,6 +77,13 @@ export const GET: RequestHandler = async ({ params, url, request, cookies}) => {
 					// Stream closed, ignore
 				}
 			};
+			const heartbeat = setInterval(() => {
+				try {
+					controller.enqueue(encoder.encode(': keepalive\n\n'));
+				} catch {
+					// Stream closed, ignore
+				}
+			}, 25_000);
 
 			// Initial ping so the client knows the connection is alive
 			send({ type: 'connected', resource });
@@ -434,6 +436,8 @@ export const GET: RequestHandler = async ({ params, url, request, cookies}) => {
 				}
 			}
 
+			clearInterval(heartbeat);
+
 			try {
 				controller.close();
 			} catch {
@@ -450,7 +454,6 @@ export const GET: RequestHandler = async ({ params, url, request, cookies}) => {
 		headers: {
 			'Content-Type': 'text/event-stream',
 			'Cache-Control': 'no-cache, no-transform',
-			Connection: 'keep-alive',
 			'X-Accel-Buffering': 'no' // Disable Nginx buffering
 		}
 	});

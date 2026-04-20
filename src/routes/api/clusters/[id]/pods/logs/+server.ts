@@ -280,7 +280,6 @@ export const GET: RequestHandler = async ({ params, url, cookies, request }) => 
 		headers: {
 			'Content-Type': 'text/event-stream',
 			'Cache-Control': 'no-cache',
-			Connection: 'keep-alive',
 			'X-Accel-Buffering': 'no'
 		}
 	});

@@ -33,6 +33,16 @@ const permanentlyFailed = new Set<string>();
 /** Registered event listeners keyed by resource name */
 const listeners = new Map<string, Set<(event: WatchEvent) => void>>();
 
+const MAX_RECONNECT_ATTEMPTS = 5;
+const BROWSER_SSE_ENABLED = false;
+let loggedSseDisabled = false;
+
+function logSseDisabled() {
+	if (loggedSseDisabled) return;
+	loggedSseDisabled = true;
+	console.info('[SSE] Browser live watches disabled; using snapshot refresh only');
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
 function connectionKey(clusterId: number, resource: string, namespace?: string): string {
@@ -62,6 +72,15 @@ function scheduleReconnect(clusterId: number, resource: string, namespace?: stri
 	if (existing) clearTimeout(existing);
 
 	const attempts = backoffCounts.get(key) ?? 0;
+	if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+		console.warn(
+			`[SSE] ${resource} watch disabled after ${MAX_RECONNECT_ATTEMPTS} failed reconnect attempts`
+		);
+		backoffCounts.delete(key);
+		permanentlyFailed.add(key);
+		return;
+	}
+
 	const delay = getBackoffMs(attempts);
 	backoffCounts.set(key, attempts + 1);
 
@@ -87,8 +106,6 @@ function createEventSource(clusterId: number, resource: string, namespace?: stri
 	const es = new EventSource(url);
 
 	es.onopen = () => {
-		// Successful connection — reset backoff
-		backoffCounts.delete(key);
 		console.log(`[SSE] Connected to ${resource} (cluster ${clusterId})`);
 	};
 
@@ -97,6 +114,7 @@ function createEventSource(clusterId: number, resource: string, namespace?: stri
 			const data = JSON.parse(e.data) as WatchEvent & { type: string; code?: string };
 
 			if (data.type === 'ADDED' || data.type === 'MODIFIED' || data.type === 'DELETED') {
+				backoffCounts.delete(key);
 				notifyListeners(resource, data as WatchEvent);
 			} else if (data.type === 'ERROR') {
 				if (data.code === 'AGENT_NOT_SUPPORTED' || data.code === 'CONFIG_ERROR') {
@@ -148,6 +166,10 @@ function createEventSource(clusterId: number, resource: string, namespace?: stri
  */
 export function subscribe(clusterId: number, resource: string, namespace?: string) {
 	if (!browser) return;
+	if (!BROWSER_SSE_ENABLED) {
+		logSseDisabled();
+		return;
+	}
 
 	const key = connectionKey(clusterId, resource, namespace);
 

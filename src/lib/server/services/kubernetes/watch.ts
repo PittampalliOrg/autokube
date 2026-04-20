@@ -147,12 +147,17 @@ async function pollResourceByConnection(
 ): Promise<void> {
 	const listPath = stripWatchParams(resourcePath);
 	let previous = new Map<string, SnapshotEntry>();
+	let hasBaseline = false;
 
 	while (!signal?.aborted) {
 		const response = await k8sRequest<ListResponse>(config, listPath, 30_000);
 		const current = buildSnapshot(response.items ?? []);
 
-		emitSnapshotDiff(previous, current, callback);
+		if (hasBaseline) {
+			emitSnapshotDiff(previous, current, callback);
+		} else {
+			hasBaseline = true;
+		}
 		previous = current;
 
 		await waitForNextPoll(signal);
@@ -295,100 +300,12 @@ export async function watchResourceByCluster(
 			authType: cluster.authType ?? undefined
 		});
 
-		// Agent connections cannot use upstream streaming watch, so emulate it via polling.
-		if (config.authType === 'agent') {
-			return pollResourceByConnection(config, resourcePath, callback, signal);
-		}
-
-		// Support both full paths and API paths from resource-paths.ts
-		const url = `${config.server}${resourcePath}`;
-		const urlObj = new URL(url);
-
-		const skipTLS =
-			config.skipTLSVerify || process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0';
-
-		const options: https.RequestOptions = {
-			hostname: urlObj.hostname,
-			port: urlObj.port || 443,
-			path: urlObj.pathname + urlObj.search,
-			method: 'GET',
-			headers: {
-				Accept: 'application/json'
-			},
-			rejectUnauthorized: !skipTLS,
-			servername: urlObj.hostname
-		};
-
-		// Add TLS options
-		if (config.ca) {
-			options.ca = config.ca;
-		}
-		if ('cert' in config && config.cert && 'key' in config && config.key) {
-			options.cert = config.cert;
-			options.key = config.key;
-		}
-		if (config.token) {
-			options.headers = {
-				...options.headers,
-				Authorization: `Bearer ${config.token}`
-			};
-		}
-
-		return new Promise((resolve, reject) => {
-			const req = https.request(options, (res) => {
-				let buffer = '';
-
-				res.on('data', (chunk) => {
-					buffer += chunk.toString();
-					const lines = buffer.split('\n');
-					buffer = lines.pop() || '';
-
-					for (const line of lines) {
-						if (line.trim()) {
-							try {
-								const event = JSON.parse(line) as WatchEvent;
-								callback(event);
-							} catch (e) {
-								console.error('[Watch Resource] Failed to parse event:', e);
-							}
-						}
-					}
-				});
-
-				res.on('end', () => {
-					resolve();
-				});
-
-				res.on('error', (err: any) => {
-					// Don't log ECONNRESET (expected when aborting)
-					if (err?.code !== 'ECONNRESET') {
-						console.error('[Watch Resource] Response error:', err);
-					}
-					reject(err);
-				});
-			});
-
-			req.on('error', (err: any) => {
-				// Don't log ECONNRESET (expected when aborting)
-				if (err?.code !== 'ECONNRESET') {
-					console.error('[Watch Resource] Request error:', err);
-				}
-				reject(err);
-			});
-
-			// Handle abort signal
-			if (signal) {
-				signal.addEventListener('abort', () => {
-					req.destroy();
-					resolve();
-				});
-			}
-
-			req.end();
-		});
+		// Keep UI streams stable across proxies and clusters that terminate native watch
+		// responses early. Diff-polling avoids browser EventSource reconnect loops that
+		// repeatedly replay large initial snapshots.
+		return pollResourceByConnection(config, resourcePath, callback, signal);
 	} catch (error) {
 		console.error('[Watch Resource] Setup error:', error);
 		throw error;
 	}
 }
-

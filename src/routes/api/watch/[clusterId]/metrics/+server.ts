@@ -13,7 +13,73 @@ import { findCluster } from '$lib/server/queries/clusters';
 import { makeClusterRequest } from '$lib/server/services/kubernetes/utils';
 import { authorize } from '$lib/server/services/authorize';
 
-export async function GET({ params, url, request, cookies }: RequestEvent) {
+const sseHeaders = {
+	'Content-Type': 'text/event-stream',
+	'Cache-Control': 'no-cache, no-transform',
+	'X-Accel-Buffering': 'no'
+};
+
+function sseError(code: string, message: string) {
+	const encoder = new TextEncoder();
+	const stream = new ReadableStream({
+		start(controller) {
+			controller.enqueue(
+				encoder.encode(
+					`data: ${JSON.stringify({ type: 'ERROR', code, error: message })}\n\n`
+				)
+			);
+			controller.close();
+		}
+	});
+
+	return new Response(stream, { headers: sseHeaders });
+}
+
+function classifyMetricsError(message: string): { code: string; message: string; reconnect: boolean } {
+	const lower = message.toLowerCase();
+
+	if (lower.includes('resource not found') || lower.includes('http 404')) {
+		return {
+			code: 'METRICS_UNAVAILABLE',
+			message: 'Metrics API is not available for this cluster',
+			reconnect: false
+		};
+	}
+
+	if (
+		lower.includes('credentials') ||
+		lower.includes('kubeconfig') ||
+		lower.includes('bearer token') ||
+		lower.includes('unsupported authentication') ||
+		lower.includes('unsupported auth') ||
+		lower.includes('could not be decrypted') ||
+		lower.includes('encryption key') ||
+		lower.includes('authentication failed') ||
+		lower.includes('access denied')
+	) {
+		return {
+			code: 'CONFIG_ERROR',
+			message,
+			reconnect: false
+		};
+	}
+
+	return {
+		code: 'CLUSTER_UNREACHABLE',
+		message: 'Cannot connect to Kubernetes API server',
+		reconnect: true
+	};
+}
+
+function waitUntilAborted(signal: AbortSignal): Promise<void> {
+	if (signal.aborted) return Promise.resolve();
+
+	return new Promise((resolve) => {
+		signal.addEventListener('abort', () => resolve(), { once: true });
+	});
+}
+
+export async function GET({ params, url, cookies }: RequestEvent) {
 	const auth = await authorize(cookies);
 	if (auth.authEnabled && !await auth.can('clusters', 'read')) {
 		return json({ error: 'Permission denied' }, { status: 403 });
@@ -26,21 +92,16 @@ export async function GET({ params, url, request, cookies }: RequestEvent) {
 	}
 
 	const cluster = await findCluster(clusterId);
-	if (!cluster || !cluster.kubeconfig) {
-		throw error(404, 'Cluster not found or missing kubeconfig');
+	if (!cluster) {
+		throw error(404, 'Cluster not found');
 	}
 
-	// Return empty stream when metrics-server integration is disabled
+	// EventSource clients need an SSE response even for permanent no-metrics states.
 	if (cluster.metricsEnabled === false) {
-		return json({ success: true, metrics: [] });
+		return sseError('METRICS_DISABLED', 'Metrics are disabled for this cluster');
 	}
 
 	const abortController = new AbortController();
-
-	// Abort when client disconnects
-	request.signal.addEventListener('abort', () => {
-		abortController.abort();
-	});
 
 	const encoder = new TextEncoder();
 
@@ -53,6 +114,13 @@ export async function GET({ params, url, request, cookies }: RequestEvent) {
 					// Stream closed, ignore
 				}
 			};
+			const heartbeat = setInterval(() => {
+				try {
+					controller.enqueue(encoder.encode(': keepalive\n\n'));
+				} catch {
+					// Stream closed, ignore
+				}
+			}, 25_000);
 
 			// Initial ping so the client knows the connection is alive
 			send({ type: 'connected', resource: 'metrics' });
@@ -67,6 +135,7 @@ export async function GET({ params, url, request, cookies }: RequestEvent) {
 			try {
 				// Poll metrics every 3 seconds
 				const pollInterval = 3000;
+				let hasBaseline = false;
 
 				while (!abortController.signal.aborted) {
 					try {
@@ -101,9 +170,10 @@ export async function GET({ params, url, request, cookies }: RequestEvent) {
 									const current = { cpu: transformedMetric.cpu, memory: transformedMetric.memory };
 
 									if (
-										!previous ||
-										previous.cpu !== current.cpu ||
-										previous.memory !== current.memory
+										hasBaseline &&
+										(!previous ||
+											previous.cpu !== current.cpu ||
+											previous.memory !== current.memory)
 									) {
 										// Send as MODIFIED event with full PodMetrics structure
 										send({
@@ -117,12 +187,14 @@ export async function GET({ params, url, request, cookies }: RequestEvent) {
 							});
 
 							// Check for deleted pods (metrics disappeared)
-							for (const [key, previousMetric] of previousMetrics) {
-								if (!currentMetrics.has(key)) {
-									send({
-										type: 'DELETED',
-										object: previousMetric
-									});
+							if (hasBaseline) {
+								for (const [key, previousMetric] of previousMetrics) {
+									if (!currentMetrics.has(key)) {
+										send({
+											type: 'DELETED',
+											object: previousMetric
+										});
+									}
 								}
 							}
 
@@ -130,6 +202,18 @@ export async function GET({ params, url, request, cookies }: RequestEvent) {
 							previousMetrics = new Map();
 							for (const [key, metric] of currentMetrics) {
 								previousMetrics.set(key, { cpu: metric.cpu, memory: metric.memory });
+							}
+							hasBaseline = true;
+						} else if (!result.success) {
+							const classified = classifyMetricsError(result.error ?? 'Metrics request failed');
+							send({
+								type: 'ERROR',
+								code: classified.code,
+								error: classified.message
+							});
+							if (!classified.reconnect) {
+								await waitUntilAborted(abortController.signal);
+								break;
 							}
 						}
 					} catch (err: any) {
@@ -146,7 +230,6 @@ export async function GET({ params, url, request, cookies }: RequestEvent) {
 								code: 'CLUSTER_UNREACHABLE',
 								error: 'Cannot connect to Kubernetes API server'
 							});
-							break; // Stop polling - client will reconnect with backoff
 						} else if (!errorMsg.includes('404')) {
 							console.error('[SSE Metrics] Poll error:', errorMsg);
 						}
@@ -177,6 +260,7 @@ export async function GET({ params, url, request, cookies }: RequestEvent) {
 			}
 
 			console.log('[SSE Metrics] Stream ended');
+			clearInterval(heartbeat);
 
 			try {
 				controller.close();
@@ -191,11 +275,6 @@ export async function GET({ params, url, request, cookies }: RequestEvent) {
 	});
 
 	return new Response(stream, {
-		headers: {
-			'Content-Type': 'text/event-stream',
-			'Cache-Control': 'no-cache, no-transform',
-			Connection: 'keep-alive',
-			'X-Accel-Buffering': 'no' // Disable Nginx buffering
-		}
+		headers: sseHeaders
 	});
 }

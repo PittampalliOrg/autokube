@@ -56,6 +56,8 @@ export interface MetricsWatchOptions {
  * metricsWatch.unsubscribe();
  */
 export function useMetricsWatch(options: MetricsWatchOptions) {
+	const browserSseEnabled = false;
+
 	if (!browser) {
 		return {
 			subscribe: () => {},
@@ -68,9 +70,35 @@ export function useMetricsWatch(options: MetricsWatchOptions) {
 	let isActive = false;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	let backoffAttempts = 0;
+	const maxReconnectAttempts = 5;
+
+	const permanentErrorCodes = new Set([
+		'METRICS_DISABLED',
+		'METRICS_UNAVAILABLE',
+		'CONFIG_ERROR',
+		'AGENT_NOT_SUPPORTED'
+	]);
 
 	function getBackoffMs(): number {
 		return Math.min(1000 * Math.pow(2, backoffAttempts), 30_000);
+	}
+
+	function closeConnection() {
+		if (reconnectTimer) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = null;
+		}
+
+		if (eventSource) {
+			eventSource.close();
+			eventSource = null;
+		}
+	}
+
+	function stopAfterPermanentError(error: unknown) {
+		if (options.onError) options.onError(error);
+		isActive = false;
+		closeConnection();
 	}
 
 	function connect() {
@@ -87,8 +115,7 @@ export function useMetricsWatch(options: MetricsWatchOptions) {
 		eventSource = new EventSource(metricsUrl);
 
 		eventSource.onopen = () => {
-			// Successful connection — reset backoff
-			backoffAttempts = 0;
+			// Connection opened; keep the current backoff until data is received.
 		};
 
 		eventSource.onmessage = (e: MessageEvent) => {
@@ -96,9 +123,11 @@ export function useMetricsWatch(options: MetricsWatchOptions) {
 				const event = JSON.parse(e.data) as WatchEvent & { code?: string };
 
 				if (event.type === 'MODIFIED') {
+					backoffAttempts = 0;
 					const metric = event.object as PodMetric;
 					if (options.onUpdate) options.onUpdate(metric);
 				} else if (event.type === 'DELETED') {
+					backoffAttempts = 0;
 					const metric = event.object as PodMetric;
 					if (options.onDelete) options.onDelete(metric);
 				} else if (event.type === 'ERROR') {
@@ -108,6 +137,9 @@ export function useMetricsWatch(options: MetricsWatchOptions) {
 						eventSource?.close();
 						eventSource = null;
 						scheduleReconnect();
+					} else if (event.code && permanentErrorCodes.has(event.code)) {
+						console.warn(`[Metrics Watch] ${event.code}: ${(event as any).error ?? ''}`);
+						stopAfterPermanentError((event as any).error ?? event.code);
 					} else {
 						if (options.onError) options.onError((event as any).error);
 					}
@@ -128,6 +160,14 @@ export function useMetricsWatch(options: MetricsWatchOptions) {
 
 	function scheduleReconnect() {
 		if (!isActive) return;
+		if (backoffAttempts >= maxReconnectAttempts) {
+			console.warn(
+				`[Metrics Watch] Disabled after ${maxReconnectAttempts} failed reconnect attempts`
+			);
+			isActive = false;
+			closeConnection();
+			return;
+		}
 		if (reconnectTimer) clearTimeout(reconnectTimer);
 		const delay = getBackoffMs();
 		backoffAttempts++;
@@ -139,6 +179,11 @@ export function useMetricsWatch(options: MetricsWatchOptions) {
 	}
 
 	const subscribe = () => {
+		if (!browserSseEnabled) {
+			console.info('[Metrics Watch] Browser live metrics disabled; using snapshot refresh only');
+			return;
+		}
+
 		if (isActive) {
 			console.warn('[Metrics Watch] Already subscribed');
 			return;
@@ -157,16 +202,7 @@ export function useMetricsWatch(options: MetricsWatchOptions) {
 		if (!isActive) return;
 
 		isActive = false;
-
-		if (reconnectTimer) {
-			clearTimeout(reconnectTimer);
-			reconnectTimer = null;
-		}
-
-		if (eventSource) {
-			eventSource.close();
-			eventSource = null;
-		}
+		closeConnection();
 
 		console.log('[Metrics Watch] Unsubscribed');
 	};

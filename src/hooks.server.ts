@@ -5,6 +5,7 @@ import { getSession } from '$lib/server/queries/sessions';
 import { startNotificationMonitor } from '$lib/server/services/notification-monitor';
 import { initScanScheduler } from '$lib/server/services/scan-scheduler';
 import { startMetricsCollector } from '$lib/server/services/metrics-collector';
+import { startResourceCache } from '$lib/server/services/resource-cache';
 import {
 	validateAgentToken,
 	handleAgentOpen,
@@ -24,6 +25,9 @@ initScanScheduler();
 
 // Start background metrics collector (CPU sampling)
 startMetricsCollector();
+
+// Start server-side resource cache for high-churn Kubernetes tables
+startResourceCache();
 
 export const handle: Handle = async ({ event, resolve }) => {
 	const { pathname } = event.url;
