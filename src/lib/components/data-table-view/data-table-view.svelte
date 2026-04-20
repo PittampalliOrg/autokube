@@ -214,16 +214,29 @@
 
 	// ─── Selection ─────────────────────────────────────────────────────────────
 
+	function getItemKey(item: T): unknown {
+		const key = item[keyField];
+		const record =
+			item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+		const namespace = record.namespace;
+
+		if (keyField === 'name' && typeof key === 'string' && typeof namespace === 'string') {
+			return `${namespace}/${key}`;
+		}
+
+		return key;
+	}
+
 	function isItemSelectable(item: T): boolean {
 		return selectableFilter ? selectableFilter(item) : true;
 	}
 
 	const selectableData = $derived(data.filter(isItemSelectable));
 	const allSelected = $derived(
-		selectableData.length > 0 && selectableData.every((item) => selectedKeys.has(item[keyField]))
+		selectableData.length > 0 && selectableData.every((item) => selectedKeys.has(getItemKey(item)))
 	);
 	const someSelected = $derived(
-		!allSelected && selectableData.some((item) => selectedKeys.has(item[keyField]))
+		!allSelected && selectableData.some((item) => selectedKeys.has(getItemKey(item)))
 	);
 
 	function isSelected(key: unknown): boolean {
@@ -240,14 +253,14 @@
 
 	function selectAll() {
 		const next = new Set(selectedKeys);
-		for (const item of selectableData) next.add(item[keyField]);
+		for (const item of selectableData) next.add(getItemKey(item));
 		selectedKeys = next;
 		onSelectionChange?.(next);
 	}
 
 	function selectNone() {
 		const next = new Set(selectedKeys);
-		for (const item of selectableData) next.delete(item[keyField]);
+		for (const item of selectableData) next.delete(getItemKey(item));
 		selectedKeys = next;
 		onSelectionChange?.(next);
 	}
@@ -464,10 +477,10 @@
 		if (cached && cached.index === actualIndex) return cached;
 
 		const state: TableRowState = {
-			isSelected: isSelected(item[keyField]),
-			isHighlighted: highlightedKey === item[keyField],
+			isSelected: isSelected(getItemKey(item)),
+			isHighlighted: highlightedKey === getItemKey(item),
 			isSelectable: isItemSelectable(item),
-			isExpanded: isExpanded(item[keyField]),
+			isExpanded: isExpanded(getItemKey(item)),
 			index: actualIndex
 		};
 		rowStateCache.set(item as object, state);
@@ -647,7 +660,7 @@
 							type="button"
 							onclick={(e) => {
 								e.stopPropagation();
-								toggleSelection(item[keyField]);
+								toggleSelection(getItemKey(item));
 							}}
 							class="flex h-full min-h-[24px] w-full cursor-pointer items-center justify-center transition-colors"
 							class:opacity-100={rowState.isSelected}
@@ -661,7 +674,7 @@
 						type="button"
 						onclick={(e) => {
 							e.stopPropagation();
-							toggleExpand(item[keyField]);
+							toggleExpand(getItemKey(item));
 						}}
 						class="flex cursor-pointer items-center justify-center opacity-50 transition-colors hover:opacity-100"
 						title={rowState.isExpanded ? 'Collapse' : 'Expand'}
@@ -836,7 +849,7 @@
 					>
 				{/if}
 
-				{#each visibleData as item, index (item[keyField])}
+				{#each visibleData as item, index (getItemKey(item))}
 					{@render dataRow(item, index)}
 				{/each}
 
@@ -861,7 +874,7 @@
 		<table class="data-table-view table-fixed text-sm {className}" style="width: {totalTableWidth}px">
 			{@render tableHeader()}
 			<tbody>
-				{#each visibleData as item, index (item[keyField])}
+				{#each visibleData as item, index (getItemKey(item))}
 					{@render dataRow(item, index)}
 				{/each}
 
